@@ -1,0 +1,9 @@
+env: development
+port: 8080
+database_url: "postgres://user:pass@localhost:5432/authdb?sslmode=disable"
+redis_url: "localhost:6379"
+kafka_brokers: "localhost:9092"
+logger:
+  level: debug
+  encoding: console
+  output: stdout  
