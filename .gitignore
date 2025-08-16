@@ -1,0 +1,16 @@
+# Terraform files
+scripts/terraform/.terraform/
+scripts/terraform/*.tfstate
+scripts/terraform/*.tfstate.*
+scripts/terraform/.terraform.lock.hcl
+scripts/terraform/terraform.tfvars
+scripts/terraform/*.auto.tfvars
+
+# Sensible additions for Go projects
+.env
+*.log
+vendor/
+.idea/
+*.exe
+*.test
+coverage.out

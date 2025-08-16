@@ -11,21 +11,35 @@ import (
 
 // LoadConfig loads configuration from YAML and environment variables
 func LoadConfig(path string) (*Config, error) {
-	cfg := &Config{}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
+    cfg := &Config{}
 
-	// Expand environment variables in YAML
-	expanded := os.ExpandEnv(string(data))
-	if err := yaml.Unmarshal([]byte(expanded), cfg); err != nil {
-		return nil, err
-	}
+    // Read YAML file
+    data, err := os.ReadFile(path)
+    if err != nil {
+        return nil, err
+    }
 
-	return cfg, nil
+    // Expand any ${VAR} placeholders in YAML
+    expanded := os.ExpandEnv(string(data))
+
+    // Unmarshal YAML into cfg
+    if err := yaml.Unmarshal([]byte(expanded), cfg); err != nil {
+        return nil, err
+    }
+
+    // ✅ Apply environment variable overrides
+    if err := overrideWithEnv(cfg); err != nil {
+        return nil, err
+    }
+	 // ✅ Apply manual overrides for nested fields
+	 if v := os.Getenv("PHONE_HASH_SECRET"); v != "" {
+        cfg.OTP.PhoneHashSecret = v
+    }
+
+    return cfg, nil
 }
 
+// overrideWithEnv applies env tag overrides on struct fields
 func overrideWithEnv(cfg *Config) error {
     v := reflect.ValueOf(cfg).Elem()
     t := v.Type()

@@ -57,8 +57,14 @@ resource "aws_security_group" "app_sg" {
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = ["103.134.116.198/32"]
   }
+  ingress {
+  from_port   = 443
+  to_port     = 443
+  protocol    = "tcp"
+  cidr_blocks = ["0.0.0.0/0"]
+ }
 
   ingress {
     from_port   = 80
@@ -109,6 +115,7 @@ resource "aws_instance" "app_server" {
   subnet_id              = aws_subnet.public.id
   vpc_security_group_ids = [aws_security_group.app_sg.id]
   key_name               = var.key_pair_name
+  iam_instance_profile = aws_iam_instance_profile.app_profile.name  # Add this line
 
   tags = {
     Name = "AuthService-AppServer"
@@ -139,7 +146,7 @@ resource "aws_db_instance" "auth_db" {
   username             = var.db_username
   password             = var.db_password
   skip_final_snapshot  = true
-  publicly_accessible  = true  # For development only
+  publicly_accessible  = false  # For development only
   vpc_security_group_ids = [aws_security_group.app_sg.id]
   db_subnet_group_name = aws_db_subnet_group.main.name
 

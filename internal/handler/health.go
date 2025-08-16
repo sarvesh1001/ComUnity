@@ -1,4 +1,3 @@
-
 package handler
 
 import (
@@ -7,12 +6,14 @@ import (
     "encoding/json"
     "fmt"
     "net/http"
+    "net/url"
+    "strconv"
     "strings"
     "time"
 
+    "github.com/ComUnity/auth-service/internal/client"
     "github.com/ComUnity/auth-service/internal/config"
     "github.com/ComUnity/auth-service/internal/util/logger"
-    "github.com/go-redis/redis/v8"
     _ "github.com/lib/pq" // PostgreSQL driver
 )
 
@@ -275,7 +276,7 @@ func (d *DatabaseHealthChecker) Check() CheckResult {
     }
 }
 
-// RedisHealthChecker checks the health of Redis
+// RedisHealthChecker checks the health of Redis using internal client
 type RedisHealthChecker struct {
     url string
 }
@@ -285,7 +286,8 @@ func (r *RedisHealthChecker) Name() string {
 }
 
 func (r *RedisHealthChecker) Check() CheckResult {
-    opt, err := redis.ParseURL(r.url)
+    // Parse redis:// URL and convert to client.RedisConfig
+    cfg, err := parseRedisURLToConfig(r.url)
     if err != nil {
         logger.Error("Redis URL parse error: %v", err)
         return CheckResult{
@@ -294,14 +296,22 @@ func (r *RedisHealthChecker) Check() CheckResult {
         }
     }
 
-    client := redis.NewClient(opt)
-    defer client.Close()
-
+    // Create client and test ping
     ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
     defer cancel()
 
-    // Test connection
-    pong, err := client.Ping(ctx).Result()
+    rc, err := client.NewRedisClient(ctx, cfg)
+    if err != nil {
+        logger.Error("Redis connect error: %v", err)
+        return CheckResult{
+            Status: HealthStatusUnhealthy,
+            Error:  fmt.Sprintf("Connection failed: %v", err),
+        }
+    }
+    defer rc.Close()
+
+    // Ping
+    pong, err := rc.Ping(ctx).Result()
     if err != nil {
         logger.Error("Redis ping error: %v", err)
         return CheckResult{
@@ -310,15 +320,15 @@ func (r *RedisHealthChecker) Check() CheckResult {
         }
     }
 
-    // Get Redis info
-    info, err := client.Info(ctx, "server").Result()
+    // INFO server (optional, same as previous behavior)
+    info, _ := rc.Info(ctx, "server").Result()
     metadata := map[string]interface{}{
         "ping_response": pong,
-        "database":      opt.DB,
-        "pool_size":     opt.PoolSize,
+        "database":      cfg.DB,
+        "pool_size":     cfg.PoolSize,
     }
 
-    if err == nil && strings.Contains(info, "redis_version") {
+    if strings.Contains(info, "redis_version") {
         lines := strings.Split(info, "\r\n")
         for _, line := range lines {
             if strings.HasPrefix(line, "redis_version:") {
@@ -335,6 +345,58 @@ func (r *RedisHealthChecker) Check() CheckResult {
     }
 }
 
+// Convert redis:// URL to client.RedisConfig (no behavior change)
+func parseRedisURLToConfig(u string) (client.RedisConfig, error) {
+    parsed, err := url.Parse(u)
+    if err != nil {
+        return client.RedisConfig{}, err
+    }
+
+    // Default host:port if missing port
+    host := parsed.Host
+    if host == "" {
+        host = "127.0.0.1:6379"
+    } else if !strings.Contains(host, ":") {
+        host = host + ":6379"
+    }
+
+    // Password from URL userinfo
+    var password string
+    if parsed.User != nil {
+        if p, ok := parsed.User.Password(); ok {
+            password = p
+        }
+    }
+
+    // DB number from path
+    db := 0
+    if len(parsed.Path) > 1 {
+        if n, err := strconv.Atoi(strings.TrimPrefix(parsed.Path, "/")); err == nil {
+            db = n
+        }
+    }
+
+    // Keep defaults consistent with your client
+    return client.RedisConfig{
+        Address:         host,
+        Password:        password,
+        DB:              db,
+        PoolSize:        10,                 // same sensible defaults as client
+        MinIdleConns:    5,                  // half of PoolSize
+        DialTimeout:     5 * time.Second,
+        ReadTimeout:     3 * time.Second,
+        WriteTimeout:    3 * time.Second,
+        PoolTimeout:     4 * time.Second,
+        ConnMaxIdleTime: 5 * time.Minute,
+        CircuitBreaker: client.CircuitBreakerConfig{
+            Enabled:      false, // health check should not be blocked by CB
+            FailureRatio: 0.5,
+            RecoveryTime: 30 * time.Second,
+            MinRequests:  20,
+        },
+    }, nil
+}
+
 // ApplicationHealthChecker checks application-specific health
 type ApplicationHealthChecker struct {
     config *config.Config
@@ -348,8 +410,8 @@ func (a *ApplicationHealthChecker) Check() CheckResult {
     metadata := map[string]interface{}{
         "environment":     a.config.Env,
         "compliance_mode": a.config.ComplianceMode,
-        "port":             a.config.Port,
-        "log_level":        a.config.LogLevel,
+        "port":            a.config.Port,
+        "log_level":       a.config.LogLevel,
     }
 
     // Check if we're in a valid state
