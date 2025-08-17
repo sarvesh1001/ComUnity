@@ -1,15 +1,17 @@
 env: development
 port: 8080
 
-database_url: "postgres://user:pass@localhost:5432/authdb?sslmode=disable"
-redis_url: "redis://localhost:6379"  # For non-Docker runs; Docker will override via env
-kafka_brokers: "localhost:9092"
+database_url: "postgres://user:pass@postgres:5432/authdb?sslmode=disable"
+redis_url: "redis://redis:6379"
+kafka_brokers: "kafka:9092"   # update once Kafka container is added
 aadhaar_api_key: ""
 
 logger:
   level: debug
   encoding: console
   output: stdout
+  add_source: false
+  time_format: ""
 
 tls:
   hsts_max_age: 63072000
@@ -41,7 +43,7 @@ otp:
   max_daily_per_user: 5
   block_duration: 24h
   require_phone_hash: true
-  phone_hash_secret: ""          # overridden by env PHONE_HASH_SECRET in Docker
+  phone_hash_secret: "dev-secret-change-me"
   delivery_simulation: true
   india_specific_limits: true
 
@@ -54,3 +56,40 @@ india_otp_rate_limit:
     - "10.0.0.0/8"
     - "192.168.0.0/16"
   strict_on_failure: true
+
+# NEW: device fingerprint configuration
+fingerprint:
+  trusted_proxy_ip_headers:
+    - "X-Forwarded-For"
+    - "X-Real-IP"
+  trusted_proxy_cidrs:
+    - "10.0.0.0/8"
+    - "172.16.0.0/12"
+    - "192.168.0.0/16"
+  enable_ip_bucketing: true
+  privacy_enhanced: false
+  server_pepper: "this-is-a-local-pepper-123"      # base64/raw/hex; must decode to >=16 bytes
+  context_deadline: 100ms
+  ua_cache_ttl: 5m
+
+telemetry:
+  device_audit:
+    enabled: false
+    endpoint: "https://localhost:9200"
+    api_key: ""
+    username: ""
+    password: ""
+    index_prefix: "device-audit"
+    flush_size: 500
+    flush_every: 2s
+    timeout: 5s
+  otp_audit:
+    enabled: false
+    endpoint: "https://localhost:9200"
+    api_key: ""
+    username: ""
+    password: ""
+    index_prefix: "otp-audit"
+    flush_size: 500
+    flush_every: 2s
+    timeout: 5s

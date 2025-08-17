@@ -1,11 +1,6 @@
-package config // 👈 keep this at the very top
+package config
 
-import (
-    "time"
-
-    // "github.com/ComUnity/auth-service/internal/service"
-    // "github.com/ComUnity/auth-service/internal/middleware"
-)
+import "time"
 
 type Config struct {
 	Env            string       `yaml:"env" env:"APP_ENV"`
@@ -37,18 +32,23 @@ type Config struct {
 		EncryptionContext   map[string]string `yaml:"encryption_context"`
 	} `yaml:"kms"`
 
-	// Use named types instead of inline
-	OTP              OTPConfig        `yaml:"otp"`
-	IndiaOTPRateLimit IndiaOTPConfig  `yaml:"india_otp_rate_limit"`
+	OTP               OTPConfig      `yaml:"otp"`
+	IndiaOTPRateLimit IndiaOTPConfig `yaml:"india_otp_rate_limit"`
+
+	// NEW
+	Fingerprint FingerprintConfig `yaml:"fingerprint"`
+
+	Telemetry TelemetryConfig `yaml:"telemetry"`
 }
 
 type LoggerConfig struct {
-	Level    string `yaml:"level"`
-	Encoding string `yaml:"encoding"`
-	Output   string `yaml:"output"`
+	Level      string `yaml:"level"`
+	Encoding   string `yaml:"encoding"`
+	Output     string `yaml:"output"`
+	AddSource  bool   `yaml:"add_source"`
+	TimeFormat string `yaml:"time_format"`
 }
 
-// ✅ New named types
 type OTPConfig struct {
 	CodeLength          int           `yaml:"code_length"`
 	Expiration          time.Duration `yaml:"expiration"`
@@ -69,4 +69,32 @@ type IndiaOTPConfig struct {
 	BlockDuration   time.Duration `yaml:"block_duration"`
 	WhitelistedIPs  []string      `yaml:"whitelisted_ips"`
 	StrictOnFailure bool          `yaml:"strict_on_failure"`
+}
+
+type TelemetryConfig struct {
+	DeviceAudit ESAuditConfig `yaml:"device_audit"`
+	OTPAudit    ESAuditConfig `yaml:"otp_audit"`
+}
+
+type ESAuditConfig struct {
+	Enabled    bool          `yaml:"enabled"`
+	Endpoint   string        `yaml:"endpoint"`
+	APIKey     string        `yaml:"api_key"`
+	Username   string        `yaml:"username"`
+	Password   string        `yaml:"password"`
+	IndexPref  string        `yaml:"index_prefix"`
+	FlushSize  int           `yaml:"flush_size"`
+	FlushEvery time.Duration `yaml:"flush_every"`
+	Timeout    time.Duration `yaml:"timeout"`
+}
+
+// NEW: maps to middleware.DeviceFPConfig
+type FingerprintConfig struct {
+	TrustedProxyIPHeaders []string      `yaml:"trusted_proxy_ip_headers"`
+	TrustedProxyCIDRs     []string      `yaml:"trusted_proxy_cidrs"`
+	EnableIPBucketing     bool          `yaml:"enable_ip_bucketing"`
+	PrivacyEnhanced       bool          `yaml:"privacy_enhanced"`
+	ServerPepper          string        `yaml:"server_pepper"`    // raw secret string; decode to []byte in loader
+	ContextDeadline       time.Duration `yaml:"context_deadline"`
+	UACacheTTL            time.Duration `yaml:"ua_cache_ttl"`
 }

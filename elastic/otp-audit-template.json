@@ -1,0 +1,29 @@
+{
+    "index_patterns": ["otp-audit-*"],
+    "template": {
+      "settings": {
+        "number_of_shards": 3,
+        "number_of_replicas": 1,
+        "index.refresh_interval": "30s"
+      },
+      "mappings": {
+        "dynamic": false,
+        "properties": {
+          "@timestamp": {"type": "date"},
+          "route": {"type": "keyword"},
+          "method": {"type": "keyword"},
+          "status": {"type": "integer"},
+          "duration_ms": {"type": "long"},
+          "device_key": {"type": "keyword"},
+          "platform": {"type": "keyword"},
+          "app_version": {"type": "keyword"},
+          "ip_bucket": {"type": "keyword"},
+          "ua_hash": {"type": "keyword"},
+          "outcome": {"type": "keyword"},
+          "reason": {"type": "keyword"}
+        }
+      }
+    },
+    "priority": 100
+  }
+  
