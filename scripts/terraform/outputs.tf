@@ -55,3 +55,12 @@ output "aadhaar_param_name" {
   description = "Name of the Aadhaar API key parameter"
   value       = aws_ssm_parameter.aadhaar_api_key.name
 }
+output "redis_endpoint" {
+  description = "Redis primary endpoint"
+  value       = module.redis.primary_endpoint
+}
+
+output "opensearch_endpoint" {
+  description = "OpenSearch domain endpoint"
+  value       = module.opensearch.domain_endpoint
+}

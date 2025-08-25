@@ -9,37 +9,31 @@ import (
 	"github.com/ComUnity/auth-service/internal/util/logger"
 )
 
-// Adds optional ES telemetry while keeping logger.Info.
-// Privacy-preserving: no raw phone/OTP or raw IP/UA.
+// OTPAuditMW publishes OTP audit events via a generic Publisher (Kafka).
 type OTPAuditMW struct {
-	Shipper *telemetry.ESAuditShipper
+	Shipper Publisher
 }
 
-func NewOTPAuditMW(shipper *telemetry.ESAuditShipper) *OTPAuditMW {
+func NewOTPAuditMW(shipper Publisher) *OTPAuditMW {
 	return &OTPAuditMW{Shipper: shipper}
 }
 
+// Back-compat wrapper (kept; now no-op shipper).
 func OTPAuditLogger(next http.Handler) http.Handler {
-	// Backward compatibility wrapper if you were directly using this function.
 	return NewOTPAuditMW(nil).Handler(next)
 }
 
 func (m *OTPAuditMW) Handler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Wrap only OTP endpoints
 		if r.URL.Path != "/otp/send" && r.URL.Path != "/otp/verify" {
 			next.ServeHTTP(w, r)
 			return
 		}
-
 		start := time.Now()
-		ww := &wrapWriter{ResponseWriter: w, status: 200} // reuse shared wrapWriter
-
+		ww := &wrapWriter{ResponseWriter: w, status: 200}
 		next.ServeHTTP(ww, r)
 
-		// Read device fingerprint context if present
 		fp, _ := FromContext(r.Context())
-
 		fields := []any{
 			"path", r.URL.Path,
 			"method", r.Method,
@@ -53,7 +47,6 @@ func (m *OTPAuditMW) Handler(next http.Handler) http.Handler {
 			Status:     ww.status,
 			DurationMs: time.Since(start).Milliseconds(),
 		}
-
 		if fp != nil {
 			fields = append(fields,
 				"device_key", fp.DeviceKey,
@@ -69,19 +62,15 @@ func (m *OTPAuditMW) Handler(next http.Handler) http.Handler {
 			ev.UAHash = fp.UAHash
 		}
 
-		// No raw phone/code in logs
 		logger.Info("otp_audit", fields...)
 
-		// Publish to ES (non-blocking)
+		// Publish to Kafka (non-blocking). ES is handled by KafkaToES.
 		if m.Shipper != nil {
 			m.Shipper.Publish(ev)
 		}
 	})
 }
 
-// Removed duplicate wrapWriter and WriteHeader here.
-
-// Helper remains unchanged
 func firstIP(xff string) string {
 	if xff == "" {
 		return ""

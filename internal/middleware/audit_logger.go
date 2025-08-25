@@ -8,13 +8,18 @@ import (
 	"github.com/ComUnity/auth-service/internal/telemetry"
 )
 
-// Privacy-preserving request audit logger.
-// Adds optional ES telemetry while keeping slog logs.
-type DeviceAuditMW struct {
-	Shipper *telemetry.ESAuditShipper
+// Publisher is the minimal interface middlewares need.
+type Publisher interface {
+	Publish(any)
 }
 
-func NewDeviceAuditMW(shipper *telemetry.ESAuditShipper) *DeviceAuditMW {
+// Privacy-preserving request audit logger.
+// Now decoupled from ES. We inject a Publisher (KafkaAuditShipper in our wiring).
+type DeviceAuditMW struct {
+	Shipper Publisher
+}
+
+func NewDeviceAuditMW(shipper Publisher) *DeviceAuditMW {
 	return &DeviceAuditMW{Shipper: shipper}
 }
 
@@ -22,11 +27,9 @@ func (m *DeviceAuditMW) Handler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		ww := &wrapWriter{ResponseWriter: w, status: 200}
-
 		next.ServeHTTP(ww, r)
 
 		fp, _ := FromContext(r.Context())
-
 		if fp != nil {
 			slog.Info("request_audit",
 				"path", r.URL.Path,
@@ -39,8 +42,6 @@ func (m *DeviceAuditMW) Handler(next http.Handler) http.Handler {
 				"ip_bucket", fp.IPBucket,
 				"ua_hash", fp.UAHash,
 			)
-
-			// Publish to ES (non-blocking)
 			if m.Shipper != nil {
 				m.Shipper.Publish(telemetry.DeviceAuditEvent{
 					Timestamp:  time.Now().UTC(),
@@ -62,7 +63,6 @@ func (m *DeviceAuditMW) Handler(next http.Handler) http.Handler {
 				"status", ww.status,
 				"latency_ms", time.Since(start).Milliseconds(),
 			)
-
 			if m.Shipper != nil {
 				m.Shipper.Publish(telemetry.DeviceAuditEvent{
 					Timestamp:  time.Now().UTC(),

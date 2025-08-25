@@ -1,121 +1,143 @@
+// File: internal/loader/loader.go
 package loader
 
 import (
-	"context"
-	"fmt"
-	"os"
-	"time"
+    "context"
+    "fmt"
+    "net/http"
+    "os"
+    "time"
 
-	"gopkg.in/yaml.v3"
-
-	cfgpkg "github.com/ComUnity/auth-service/internal/config"
-	"github.com/ComUnity/auth-service/internal/middleware"
-	"github.com/ComUnity/auth-service/internal/util/logger"
-	"github.com/ComUnity/auth-service/internal/telemetry"
-	"net/http"
+    cfgpkg "github.com/ComUnity/auth-service/internal/config"
+    "github.com/ComUnity/auth-service/internal/middleware"
+    "github.com/ComUnity/auth-service/internal/telemetry"
+    "github.com/ComUnity/auth-service/internal/util/logger"
+    "gopkg.in/yaml.v3"
 )
 
 type App struct {
-	DeviceShipper *telemetry.ESAuditShipper
-	OTPShipper    *telemetry.ESAuditShipper
-	Mux           http.Handler
+    // Publisher used by middlewares (Kafka recommended). Keep it minimal to decouple.
+    Publisher interface {
+        Start()
+        Stop(context.Context)
+        Publish(any)
+    }
+    Mux http.Handler
 }
 
 // LoadConfig loads YAML config from file into cfgpkg.Config
 func LoadConfig(path string) (*cfgpkg.Config, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read config file: %w", err)
-	}
+    data, err := os.ReadFile(path)
+    if err != nil {
+        return nil, fmt.Errorf("failed to read config file: %w", err)
+    }
 
-	var cfg cfgpkg.Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
-	}
+    var cfg cfgpkg.Config
+    if err := yaml.Unmarshal(data, &cfg); err != nil {
+        return nil, fmt.Errorf("failed to unmarshal config: %w", err)
+    }
 
-	return &cfg, nil
+    // Validate certificate policy
+    if err := validateCertificatePolicy(&cfg.CertificatePolicy); err != nil {
+        return nil, fmt.Errorf("invalid certificate policy: %w", err)
+    }
+
+    return &cfg, nil
 }
 
+// BuildHTTPApp sets up telemetry publisher (Kafka), middlewares and returns an App
 func BuildHTTPApp(ctx context.Context, cfg cfgpkg.Config, baseMux http.Handler) (*App, error) {
-	// Init logger from config (slog default)
-	_, _ = logger.Init(logger.SlogConfig{
-		Level:     cfg.Logger.Level,
-		Encoding:  cfg.Logger.Encoding,
-		Output:    cfg.Logger.Output,
-		AddSource: cfg.Logger.AddSource,
-	})
+    // Init logger from config (slog default)
+    _, _ = logger.Init(logger.SlogConfig{
+        Level:     cfg.Logger.Level,
+        Encoding:  cfg.Logger.Encoding,
+        Output:    cfg.Logger.Output,
+        AddSource: cfg.Logger.AddSource,
+    })
 
-	// Build fingerprint middleware from config (panic on invalid like before)
-	fpCfg, err := middleware.BuildFingerprintConfigFromApp(cfg.Fingerprint)
-	if err != nil {
-		// preserve fail-fast behavior
-		panic(err)
-	}
-	fpMW := middleware.DeviceFingerprintMiddleware(fpCfg)
-	muxWithFP := fpMW(baseMux)
+    // Build fingerprint middleware from config
+    fpCfg, err := middleware.BuildFingerprintConfigFromApp(cfg.Fingerprint)
+    if err != nil {
+        return nil, fmt.Errorf("failed to build fingerprint config: %w", err)
+    }
+    fpMW := middleware.DeviceFingerprintMiddleware(fpCfg)
+    muxWithFP := fpMW(baseMux)
 
-	// Device audit shipper
-	deviceShipper := telemetry.NewESAuditShipper(telemetry.ESAuditConfig{
-		Endpoint:   cfg.Telemetry.DeviceAudit.Endpoint,
-		APIKey:     cfg.Telemetry.DeviceAudit.APIKey,
-		Username:   cfg.Telemetry.DeviceAudit.Username,
-		Password:   cfg.Telemetry.DeviceAudit.Password,
-		IndexPref:  nonEmpty(cfg.Telemetry.DeviceAudit.IndexPref, "device-audit"),
-		FlushSize:  orDefaultInt(cfg.Telemetry.DeviceAudit.FlushSize, 500),
-		FlushEvery: orDefaultDur(cfg.Telemetry.DeviceAudit.FlushEvery, 2*time.Second),
-		Timeout:    orDefaultDur(cfg.Telemetry.DeviceAudit.Timeout, 5*time.Second),
-		Enabled:    cfg.Telemetry.DeviceAudit.Enabled,
-	})
-	deviceShipper.Start()
+    // Build Kafka audit shipper as the Publisher used by middlewares
+    var publisher interface {
+        Start()
+        Stop(context.Context)
+        Publish(any)
+    }
 
-	// OTP audit shipper
-	otpShipper := telemetry.NewESAuditShipper(telemetry.ESAuditConfig{
-		Endpoint:   cfg.Telemetry.OTPAudit.Endpoint,
-		APIKey:     cfg.Telemetry.OTPAudit.APIKey,
-		Username:   cfg.Telemetry.OTPAudit.Username,
-		Password:   cfg.Telemetry.OTPAudit.Password,
-		IndexPref:  nonEmpty(cfg.Telemetry.OTPAudit.IndexPref, "otp-audit"),
-		FlushSize:  orDefaultInt(cfg.Telemetry.OTPAudit.FlushSize, 500),
-		FlushEvery: orDefaultDur(cfg.Telemetry.OTPAudit.FlushEvery, 2*time.Second),
-		Timeout:    orDefaultDur(cfg.Telemetry.OTPAudit.Timeout, 5*time.Second),
-		Enabled:    cfg.Telemetry.OTPAudit.Enabled,
-	})
-	otpShipper.Start()
+    if cfg.Telemetry.Kafka.Enabled {
+        ks, err := telemetry.NewKafkaAuditShipper(cfg.Telemetry.Kafka)
+        if err != nil {
+            return nil, fmt.Errorf("failed to init kafka audit shipper: %w", err)
+        }
+        ks.Start()
+        publisher = ks
+    } else {
+        // Optional: If Kafka disabled, you may want a no-op publisher
+        publisher = noopPublisher{}
+    }
 
-	// Wrap base mux with device audit middleware (unchanged order), but now behind fingerprint
-	deviceAuditMW := middleware.NewDeviceAuditMW(deviceShipper)
-	muxWithDeviceAudit := deviceAuditMW.Handler(muxWithFP)
+    // Wrap base mux with device audit middleware using Publisher
+    deviceAuditMW := middleware.NewDeviceAuditMW(publisher)
+    muxWithDeviceAudit := deviceAuditMW.Handler(muxWithFP)
 
-	// Wrap with OTP audit middleware (affects only /otp/send and /otp/verify)
-	otpAuditMW := middleware.NewOTPAuditMW(otpShipper)
-	finalMux := otpAuditMW.Handler(muxWithDeviceAudit)
+    // Wrap with OTP audit middleware using Publisher
+    otpAuditMW := middleware.NewOTPAuditMW(publisher)
+    finalMux := otpAuditMW.Handler(muxWithDeviceAudit)
 
-	app := &App{
-		DeviceShipper: deviceShipper,
-		OTPShipper:    otpShipper,
-		Mux:           finalMux,
-	}
+    app := &App{
+        Publisher: publisher,
+        Mux:       finalMux,
+    }
+    return app, nil
+}
 
-	return app, nil
+// validateCertificatePolicy checks TLS cert policy rules
+func validateCertificatePolicy(policy *cfgpkg.CertificatePolicy) error {
+    if policy.KeySize < 2048 {
+        return fmt.Errorf("key_size must be at least 2048")
+    }
+    if policy.RotationDays < 7 {
+        return fmt.Errorf("rotation_days must be at least 7")
+    }
+    if policy.EarlyRotationThreshold >= policy.RotationDays {
+        return fmt.Errorf("early_rotation_threshold must be less than rotation_days")
+    }
+    if len(policy.SAN) == 0 {
+        return fmt.Errorf("at least one SAN must be provided")
+    }
+    return nil
 }
 
 func nonEmpty(s, def string) string {
-	if s == "" {
-		return def
-	}
-	return s
+    if s == "" {
+        return def
+    }
+    return s
 }
 
 func orDefaultInt(v, def int) int {
-	if v <= 0 {
-		return def
-	}
-	return v
+    if v <= 0 {
+        return def
+    }
+    return v
 }
 
 func orDefaultDur(v, def time.Duration) time.Duration {
-	if v <= 0 {
-		return def
-	}
-	return v
+    if v <= 0 {
+        return def
+    }
+    return v
 }
+
+// noopPublisher is a fallback when telemetry is disabled.
+type noopPublisher struct{}
+
+func (noopPublisher) Start()                      {}
+func (noopPublisher) Stop(context.Context)        {}
+func (noopPublisher) Publish(any)                 {}

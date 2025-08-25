@@ -1,0 +1,10 @@
+[Unit]
+Description=Run certificate rotation weekly
+
+[Timer]
+OnCalendar=Mon *-*-* 02:30:00
+Persistent=true
+RandomizedDelaySec=1h
+
+[Install]
+WantedBy=timers.target

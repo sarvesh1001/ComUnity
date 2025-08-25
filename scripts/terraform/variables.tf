@@ -73,3 +73,8 @@ variable "aadhaar_api_key" {
   sensitive   = true
   default     = "dummy-key-for-dev" # Override in terraform.tfvars
 } 
+variable "alert_email" {
+  description = "Email address for receiving alerts"
+  type        = string
+  default     = "devops@example.com"
+}

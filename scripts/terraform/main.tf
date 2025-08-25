@@ -171,3 +171,40 @@ resource "aws_eip" "app_ip" {
     Name = "AppServer-EIP"
   }
 }
+# Create private subnet for data services
+resource "aws_subnet" "data_private" {
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = "10.0.2.0/24"
+  availability_zone = var.availability_zone
+  tags = {
+    Name = "DataPrivateSubnet"
+  }
+}
+
+# Create Redis cluster
+module "redis" {
+  source = "./modules/elasticache_redis"
+
+  name_prefix            = "auth-service"
+  vpc_id                = aws_vpc.main.id
+  subnet_ids            = [aws_subnet.data_private.id]
+  allowed_security_groups = [aws_security_group.app_sg.id]
+  kms_key_arn           = aws_kms_key.auth.arn
+  node_type             = "cache.t4g.micro"
+  engine_version        = "7.0"
+  automatic_failover    = true
+  transit_encryption    = true
+}
+
+# Create OpenSearch cluster
+module "opensearch" {
+  source = "./modules/opensearch"
+
+  domain_name           = "auth-service"
+  vpc_id                = aws_vpc.main.id
+  subnet_ids            = [aws_subnet.data_private.id]
+  allowed_security_groups = [aws_security_group.app_sg.id]
+  kms_key_arn           = aws_kms_key.auth.arn
+  instance_type         = "t3.small.search"
+  instance_count        = 1
+}

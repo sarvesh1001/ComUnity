@@ -62,3 +62,8 @@ resource "aws_iam_instance_profile" "app_profile" {
   name = "AuthServiceInstanceProfile"
   role = aws_iam_role.app_role.name
 }
+# Add CloudWatch permissions to the IAM role
+resource "aws_iam_role_policy_attachment" "cloudwatch" {
+  role       = aws_iam_role.app_role.name
+  policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+}

@@ -1,9 +1,10 @@
+
 env: development
 port: 8080
 
 database_url: "postgres://user:pass@postgres:5432/authdb?sslmode=disable"
 redis_url: "redis://redis:6379"
-kafka_brokers: "kafka:9092"   # update once Kafka container is added
+kafka_brokers: "kafka:9092"
 aadhaar_api_key: ""
 
 logger:
@@ -57,7 +58,6 @@ india_otp_rate_limit:
     - "192.168.0.0/16"
   strict_on_failure: true
 
-# NEW: device fingerprint configuration
 fingerprint:
   trusted_proxy_ip_headers:
     - "X-Forwarded-For"
@@ -68,11 +68,33 @@ fingerprint:
     - "192.168.0.0/16"
   enable_ip_bucketing: true
   privacy_enhanced: false
-  server_pepper: "this-is-a-local-pepper-123"      # base64/raw/hex; must decode to >=16 bytes
+  server_pepper: "this-is-a-local-pepper-123"
   context_deadline: 100ms
   ua_cache_ttl: 5m
 
-telemetry:
+
+# Certificate rotation policy
+certificate_policy:
+  rotation_days: 90
+  early_rotation_threshold: 15
+  key_size: 4096
+  signature_algorithm: "SHA256"
+  san:
+    - "authservice.example.com"
+    - "*.authservice.example.com"
+  key_usage:
+    - "digitalSignature"
+    - "keyEncipherment"
+  extended_key_usage:
+    - "serverAuth"
+  backup_count: 5
+  encryption:
+    kms_key: "alias/authservice-kms-key"
+  monitoring:
+    expiry_param: "/authservice/cert_expiry"
+    alert_days: [60, 30, 15, 7, 3, 1]
+
+  telemetry:
   device_audit:
     enabled: false
     endpoint: "https://localhost:9200"
@@ -93,3 +115,31 @@ telemetry:
     flush_size: 500
     flush_every: 2s
     timeout: 5s
+  kafka:
+    enabled: true
+    brokers: ["kafka:9092"]
+    topic_device: "device_audit"
+    topic_otp: "otp_audit"
+    batch_size: 500
+    flush_every: 2s
+    queue_capacity: 2000
+    dial_timeout: 5s
+    write_timeout: 5s
+    tls: false
+    sasl_plain: false
+    username: ""
+    password: ""
+  es_sink:
+    enabled: true
+    endpoint: "http://elasticsearch:9200"
+    api_key: ""
+    username: ""
+    password: ""
+    index_prefix: "auth-audit"
+    flush_size: 500
+    flush_every: 2s
+    timeout: 5s
+    group_id: "audit-sink-es"
+    min_bytes: 10000
+    max_bytes: 10000000
+    max_wait: 1s

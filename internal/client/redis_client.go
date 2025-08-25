@@ -11,7 +11,7 @@ import (
     "strings"
     "sync"
     "time"
-
+    
     "github.com/ComUnity/auth-service/internal/util/logger"
     "github.com/redis/go-redis/v9"
     "go.opentelemetry.io/otel"

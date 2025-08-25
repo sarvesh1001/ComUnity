@@ -9,22 +9,12 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	cfg "github.com/ComUnity/auth-service/internal/config"
 )
 
-type ESAuditConfig struct {
-	Endpoint   string        `yaml:"endpoint"`
-	APIKey     string        `yaml:"api_key"`
-	Username   string        `yaml:"username"`
-	Password   string        `yaml:"password"`
-	IndexPref  string        `yaml:"index_prefix"`
-	FlushSize  int           `yaml:"flush_size"`
-	FlushEvery time.Duration `yaml:"flush_every"`
-	Timeout    time.Duration `yaml:"timeout"`
-	Enabled    bool          `yaml:"enabled"`
-}
-
 type ESAuditShipper struct {
-	cfg   ESAuditConfig
+	cfg   cfg.ESAuditConfig
 	http  *http.Client
 	ch    chan any
 	wg    sync.WaitGroup
@@ -32,23 +22,24 @@ type ESAuditShipper struct {
 	index func(time.Time) string
 }
 
-func NewESAuditShipper(cfg ESAuditConfig) *ESAuditShipper {
-	if cfg.FlushSize <= 0 {
-		cfg.FlushSize = 500
+func NewESAuditShipper(in cfg.ESAuditConfig) *ESAuditShipper {
+	cfgv := in
+	if cfgv.FlushSize <= 0 {
+		cfgv.FlushSize = 500
 	}
-	if cfg.FlushEvery <= 0 {
-		cfg.FlushEvery = 2 * time.Second
+	if cfgv.FlushEvery <= 0 {
+		cfgv.FlushEvery = 2 * time.Second
 	}
-	if cfg.Timeout <= 0 {
-		cfg.Timeout = 5 * time.Second
+	if cfgv.Timeout <= 0 {
+		cfgv.Timeout = 5 * time.Second
 	}
 	return &ESAuditShipper{
-		cfg:  cfg,
-		http: &http.Client{Timeout: cfg.Timeout},
-		ch:   make(chan any, cfg.FlushSize*4),
+		cfg:  cfgv,
+		http: &http.Client{Timeout: cfgv.Timeout},
+		ch:   make(chan any, cfgv.FlushSize*4),
 		stop: make(chan struct{}),
 		index: func(t time.Time) string {
-			return fmt.Sprintf("%s-%04d.%02d.%02d", cfg.IndexPref, t.Year(), int(t.Month()), t.Day())
+			return fmt.Sprintf("%s-%04d.%02d.%02d", cfgv.IndexPref, t.Year(), int(t.Month()), t.Day())
 		},
 	}
 }
@@ -67,7 +58,10 @@ func (s *ESAuditShipper) Stop(ctx context.Context) {
 	}
 	close(s.stop)
 	done := make(chan struct{})
-	go func() { s.wg.Wait(); close(done) }()
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
 	select {
 	case <-done:
 	case <-ctx.Done():
@@ -91,6 +85,7 @@ func (s *ESAuditShipper) loop() {
 	defer ticker.Stop()
 
 	batch := make([]any, 0, s.cfg.FlushSize)
+
 	flush := func() {
 		if len(batch) == 0 {
 			return
@@ -118,13 +113,16 @@ func (s *ESAuditShipper) loop() {
 func (s *ESAuditShipper) bulkIndex(batch []any) error {
 	var buf bytes.Buffer
 	now := time.Now().UTC()
+
 	for _, ev := range batch {
 		evMap := map[string]any{}
 		b, _ := json.Marshal(ev)
 		_ = json.Unmarshal(b, &evMap)
+
 		if _, ok := evMap["@timestamp"]; !ok {
 			evMap["@timestamp"] = now
 		}
+
 		idx := s.index(now)
 
 		meta := map[string]any{"index": map[string]any{"_index": idx}}
@@ -142,16 +140,18 @@ func (s *ESAuditShipper) bulkIndex(batch []any) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/x-ndjson")
+
 	if s.cfg.APIKey != "" {
 		req.Header.Set("Authorization", "ApiKey "+s.cfg.APIKey)
 	} else if s.cfg.Username != "" || s.cfg.Password != "" {
 		req.SetBasicAuth(s.cfg.Username, s.cfg.Password)
 	}
+
 	resp, err := s.http.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
+	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
 }

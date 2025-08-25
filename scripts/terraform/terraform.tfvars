@@ -18,3 +18,4 @@ db_instance_class = "db.t4g.medium" # Larger DB instance for production
 
 # scripts/terraform/terraform.tfvars
 aadhaar_api_key = "your-actual-api-key-here"
+alert_email = "your-team@example.com"  # Replace with actual email
