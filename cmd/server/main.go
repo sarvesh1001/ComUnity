@@ -942,9 +942,9 @@ func main() {
 			app.OTPShipper.Stop(shutdownCtx)
 		}
 		*/
-		if app.Combined != nil {
-			app.Combined.Stop(shutdownCtx)
-		}
+		// if app.Combined != nil {
+		// 	app.Combined.Stop(shutdownCtx)
+		// }
 	}
 	
 	// Enhanced audit middleware that feeds both Kafka and incident manager
@@ -1226,7 +1226,7 @@ func LoginHandler(jwtManager *util.JWTManager, userRepo repository.UserRepositor
 
         // UPDATE LAST LOGIN TIME - ADD THIS CODE
         now := time.Now()
-        if err := userRepo.UpdateUserFields(r.Context(), user.ID, map[string]interface{}{
+        if err := userRepo.UpdateUser(r.Context(), user.ID, map[string]interface{}{
             "last_login_at": &now,
         }); err != nil {
             logger.Error("Failed to update last login time", "error", err)
@@ -2249,4 +2249,400 @@ func ModerateContentHandler(w http.ResponseWriter, r *http.Request) {
         "moderator": claims.UserContext.UserID,
         "post":      chi.URLParam(r, "postID"),
     })
+}
+// ADD THESE MISSING HANDLERS TO YOUR main.go FILE
+// These use your actual security interfaces and method signatures
+
+// Session Handler
+func InvalidateAllSessionsHandler(sessionEncryptor *security.SessionEncryptor) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        claims, ok := r.Context().Value("jwt_claims").(*util.AuthzClaims)
+        if !ok {
+            http.Error(w, "Unauthorized", http.StatusUnauthorized)
+            return
+        }
+
+        err := sessionEncryptor.InvalidateAllUserSessions(r.Context(), claims.UserContext.UserID)
+        if err != nil {
+            http.Error(w, "Failed to invalidate sessions", http.StatusInternalServerError)
+            return
+        }
+
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(map[string]interface{}{
+            "message": "All sessions invalidated",
+            "user_id": claims.UserContext.UserID,
+        })
+    }
+}
+
+// Token Rotation Handlers
+func TokenRotationStatsHandler(tokenRotator *security.TokenRotator) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        stats := tokenRotator.GetStats(r.Context())
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(stats)
+    }
+}
+
+func TriggerTokenRotationHandler(tokenRotator *security.TokenRotator) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        tokenRotator.TriggerRotation()
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(map[string]interface{}{
+            "message": "Token rotation triggered",
+            "timestamp": time.Now(),
+        })
+    }
+}
+
+func GetActiveTokensHandler(tokenRotator *security.TokenRotator) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        claims, ok := r.Context().Value("jwt_claims").(*util.AuthzClaims)
+        if !ok {
+            http.Error(w, "Unauthorized", http.StatusUnauthorized)
+            return
+        }
+
+        tokens, err := tokenRotator.GetUserTokens(r.Context(), claims.UserContext.UserID)
+        if err != nil {
+            http.Error(w, "Failed to get active tokens", http.StatusInternalServerError)
+            return
+        }
+
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(map[string]interface{}{
+            "tokens": tokens,
+            "count":  len(tokens),
+        })
+    }
+}
+
+func RevokeTokenHandler(tokenRotator *security.TokenRotator) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        tokenID := chi.URLParam(r, "tokenID")
+        if tokenID == "" {
+            http.Error(w, "Token ID required", http.StatusBadRequest)
+            return
+        }
+
+        claims, ok := r.Context().Value("jwt_claims").(*util.AuthzClaims)
+        if !ok {
+            http.Error(w, "Unauthorized", http.StatusUnauthorized)
+            return
+        }
+
+        err := tokenRotator.RevokeUserToken(r.Context(), claims.UserContext.UserID, tokenID)
+        if err != nil {
+            http.Error(w, "Failed to revoke token", http.StatusInternalServerError)
+            return
+        }
+
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(map[string]interface{}{
+            "message": "Token revoked successfully",
+            "token_id": tokenID,
+        })
+    }
+}
+
+// Certificate Management Handlers
+func CertificateStatsHandler(certManager *security.CertificateManager) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        stats := certManager.GetStats()
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(stats)
+    }
+}
+
+func IssueCertificateHandler(certManager *security.CertificateManager) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        var req struct {
+            ServiceName string   `json:"service_name"`
+            CommonName  string   `json:"common_name"`
+            SANs        []string `json:"sans"`
+        }
+
+        if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+            http.Error(w, "Invalid request", http.StatusBadRequest)
+            return
+        }
+
+        // Use your actual IssueCertificate method signature
+        cert, err := certManager.IssueCertificate(r.Context(), req.ServiceName, req.CommonName, req.SANs)
+        if err != nil {
+            http.Error(w, fmt.Sprintf("Failed to issue certificate: %v", err), http.StatusInternalServerError)
+            return
+        }
+
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(map[string]interface{}{
+            "message": "Certificate issued successfully",
+            "service_name": req.ServiceName,
+            "common_name": req.CommonName,
+            "certificate_id": cert.ID,
+            "serial": cert.SerialNumber,
+            "expires_at": cert.NotAfter,
+        })
+    }
+}
+
+func RenewCertificateHandler(certManager *security.CertificateManager) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        certId := chi.URLParam(r, "certId")
+        if certId == "" {
+            http.Error(w, "Certificate ID required", http.StatusBadRequest)
+            return
+        }
+
+        // Use your actual RenewCertificate method signature
+        cert, err := certManager.RenewCertificate(r.Context(), certId)
+        if err != nil {
+            http.Error(w, fmt.Sprintf("Failed to renew certificate: %v", err), http.StatusInternalServerError)
+            return
+        }
+
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(map[string]interface{}{
+            "message": "Certificate renewed successfully",
+            "cert_id": certId,
+            "new_cert_id": cert.ID,
+            "expires_at": cert.NotAfter,
+        })
+    }
+}
+
+func RevokeCertificateHandler(certManager *security.CertificateManager) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        certId := chi.URLParam(r, "certId")
+        if certId == "" {
+            http.Error(w, "Certificate ID required", http.StatusBadRequest)
+            return
+        }
+
+        var req struct {
+            Reason string `json:"reason"`
+        }
+        json.NewDecoder(r.Body).Decode(&req)
+        
+        if req.Reason == "" {
+            req.Reason = "Manual revocation"
+        }
+
+        err := certManager.RevokeCertificate(r.Context(), certId, req.Reason)
+        if err != nil {
+            http.Error(w, fmt.Sprintf("Failed to revoke certificate: %v", err), http.StatusInternalServerError)
+            return
+        }
+
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(map[string]interface{}{
+            "message": "Certificate revoked successfully",
+            "cert_id": certId,
+            "reason": req.Reason,
+        })
+    }
+}
+
+func CABundleHandler(certManager *security.CertificateManager) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        bundle, err := certManager.GetCABundle()
+        if err != nil {
+            http.Error(w, "Failed to get CA bundle", http.StatusInternalServerError)
+            return
+        }
+
+        w.Header().Set("Content-Type", "application/x-pem-file")
+        w.Header().Set("Content-Disposition", "attachment; filename=ca-bundle.pem")
+        w.Write(bundle)
+    }
+}
+
+func GetServiceCertificateHandler(certManager *security.CertificateManager) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        serviceName := chi.URLParam(r, "serviceName")
+        if serviceName == "" {
+            http.Error(w, "Service name required", http.StatusBadRequest)
+            return
+        }
+
+        cert, err := certManager.GetServiceCertificate(r.Context(), serviceName)
+        if err != nil {
+            http.Error(w, "Certificate not found", http.StatusNotFound)
+            return
+        }
+
+        // cert is *tls.Certificate, extract info from Leaf certificate
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(map[string]interface{}{
+            "service": serviceName,
+            "has_cert": cert != nil,
+            "leaf_cert": cert.Leaf != nil,
+            "expires_at": cert.Leaf.NotAfter,
+            "serial": cert.Leaf.SerialNumber.String(),
+            "subject": cert.Leaf.Subject.String(),
+        })
+    }
+}
+
+// mTLS Management Handlers
+func MTLSStatsHandler(mtlsManager *security.MTLSManager) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        stats := mtlsManager.GetStats()
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(stats)
+    }
+}
+
+func ValidateCertificateHandler(certManager *security.CertificateManager) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        var req struct {
+            Certificate string `json:"certificate"`
+        }
+
+        if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+            http.Error(w, "Invalid request", http.StatusBadRequest)
+            return
+        }
+
+        err := certManager.ValidateCertificate([]byte(req.Certificate))
+        valid := err == nil
+
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(map[string]interface{}{
+            "valid": valid,
+            "error": func() string {
+                if err != nil {
+                    return err.Error()
+                }
+                return ""
+            }(),
+        })
+    }
+}
+
+func GetServiceAuthHandler() http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        serviceName := chi.URLParam(r, "serviceName")
+        if serviceName == "" {
+            http.Error(w, "Service name required", http.StatusBadRequest)
+            return
+        }
+
+        // Check if service is authenticated via mTLS context
+        if auth, ok := security.GetServiceAuthFromContext(r.Context()); ok {
+            w.Header().Set("Content-Type", "application/json")
+            json.NewEncoder(w).Encode(map[string]interface{}{
+                "service": serviceName,
+                "authenticated": true,
+                "auth_method": "mtls",
+                "service_name": auth.ServiceName,
+                "common_name": auth.CommonName,
+                "authenticated_at": auth.AuthenticatedAt,
+            })
+            return
+        }
+
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(map[string]interface{}{
+            "service": serviceName,
+            "authenticated": false,
+            "auth_method": "none",
+        })
+    }
+}
+
+// Internal Service Handlers
+func InternalTokenValidationHandler(jwtManager *util.JWTManager) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        var req struct {
+            Token string `json:"token"`
+        }
+
+        if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+            http.Error(w, "Invalid request", http.StatusBadRequest)
+            return
+        }
+
+        claims, err := jwtManager.ValidateToken(req.Token)
+        if err != nil {
+            w.Header().Set("Content-Type", "application/json")
+            json.NewEncoder(w).Encode(map[string]interface{}{
+                "valid": false,
+                "error": err.Error(),
+            })
+            return
+        }
+
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(map[string]interface{}{
+            "valid": true,
+            "user_id": claims.UserContext.UserID,
+            "expires_at": claims.ExpiresAt,
+            "token_id": claims.TokenID,
+        })
+    }
+}
+
+func InternalUserPermissionsHandler(roleService service.RoleService) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        var req struct {
+            UserID      uuid.UUID `json:"user_id"`
+            CommunityID uuid.UUID `json:"community_id"`
+        }
+
+        if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+            http.Error(w, "Invalid request", http.StatusBadRequest)
+            return
+        }
+
+        authzCtx := &models.AuthzContext{
+            CommunityID: req.CommunityID,
+        }
+
+        permissions, err := roleService.GetUserPermissions(r.Context(), req.UserID, authzCtx)
+        if err != nil {
+            http.Error(w, "Failed to get permissions", http.StatusInternalServerError)
+            return
+        }
+
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(map[string]interface{}{
+            "user_id": req.UserID,
+            "community_id": req.CommunityID,
+            "permissions": permissions,
+        })
+    }
+}
+
+func InternalTokenRotationHandler(tokenRotator *security.TokenRotator) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        tokenRotator.TriggerRotation()
+        
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(map[string]interface{}{
+            "message": "Internal token rotation triggered",
+            "timestamp": time.Now(),
+        })
+    }
+}
+
+func InternalGetCertificateHandler(certManager *security.CertificateManager) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        serviceName := chi.URLParam(r, "serviceName")
+        if serviceName == "" {
+            http.Error(w, "Service name required", http.StatusBadRequest)
+            return
+        }
+
+        cert, err := certManager.GetServiceCertificate(r.Context(), serviceName)
+        if err != nil {
+            http.Error(w, "Certificate not found", http.StatusNotFound)
+            return
+        }
+
+        // Return the PEM certificate
+        w.Header().Set("Content-Type", "application/x-pem-file")
+        w.Write(cert.Certificate[0])
+    }
 }
