@@ -8,6 +8,8 @@ import (
 	"time"
 	"strings"
 	"github.com/ComUnity/auth-service/internal/client"
+	"github.com/ComUnity/auth-service/internal/util/logger"
+	"errors"
 	"github.com/ComUnity/auth-service/internal/models"
 	"github.com/google/uuid"
 )
@@ -629,13 +631,14 @@ func NewCockroachUserRepository(db *sql.DB) UserRepository {
 
 func (r *CockroachUserRepository) GetByID(ctx context.Context, userID uuid.UUID) (*models.User, error) {
 	var user models.User
-	query := `SELECT id, phone_number, username, phone_verified, setup_completed, fingerprint_data, public_visibility, created_at, updated_at 
+	query := `SELECT id, phone_number, username, phone_verified, setup_completed, public_visibility, primary_device_id, last_login_at, created_at, updated_at 
 	          FROM users 
 	          WHERE id = $1`
 
 	err := r.db.QueryRowContext(ctx, query, userID).Scan(
 		&user.ID, &user.PhoneNumber, &user.Username, &user.PhoneVerified, &user.SetupCompleted,
-		&user.FingerprintData, &user.PublicVisibility, &user.CreatedAt, &user.UpdatedAt,
+		&user.PublicVisibility, &user.PrimaryDeviceID, &user.LastLoginAt,
+		&user.CreatedAt, &user.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -646,30 +649,36 @@ func (r *CockroachUserRepository) GetByID(ctx context.Context, userID uuid.UUID)
 
 func (r *CockroachUserRepository) GetByPhone(ctx context.Context, phoneNumber string) (*models.User, error) {
 	var user models.User
-	query := `SELECT id, phone_number, username, phone_verified, setup_completed, fingerprint_data, public_visibility, created_at, updated_at 
+	query := `SELECT id, phone_number, username, phone_verified, setup_completed, public_visibility, primary_device_id, last_login_at, created_at, updated_at 
 	          FROM users 
 	          WHERE phone_number = $1`
 
 	err := r.db.QueryRowContext(ctx, query, phoneNumber).Scan(
 		&user.ID, &user.PhoneNumber, &user.Username, &user.PhoneVerified, &user.SetupCompleted,
-		&user.FingerprintData, &user.PublicVisibility, &user.CreatedAt, &user.UpdatedAt,
+		&user.PublicVisibility, &user.PrimaryDeviceID, &user.LastLoginAt,
+		&user.CreatedAt, &user.UpdatedAt,
 	)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		logger.Errorf("GetByPhone DB error: %v, phone=%s", err, phoneNumber)
 		return nil, err
 	}
-
 	return &user, nil
-}
+}		
+		
 
 func (r *CockroachUserRepository) GetByUsername(ctx context.Context, username string) (*models.User, error) {
 	var user models.User
-	query := `SELECT id, phone_number, username, phone_verified, setup_completed, fingerprint_data, public_visibility, created_at, updated_at 
+	query := `SELECT id, phone_number, username, phone_verified, setup_completed, public_visibility, primary_device_id, last_login_at, created_at, updated_at 
 	          FROM users 
 	          WHERE username = $1 AND public_visibility = true`
 
 	err := r.db.QueryRowContext(ctx, query, username).Scan(
 		&user.ID, &user.PhoneNumber, &user.Username, &user.PhoneVerified, &user.SetupCompleted,
-		&user.FingerprintData, &user.PublicVisibility, &user.CreatedAt, &user.UpdatedAt,
+		&user.PublicVisibility, &user.PrimaryDeviceID, &user.LastLoginAt,
+		&user.CreatedAt, &user.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -679,36 +688,35 @@ func (r *CockroachUserRepository) GetByUsername(ctx context.Context, username st
 }
 
 func (r *CockroachUserRepository) CreateUser(ctx context.Context, user *models.User) error {
-	query := `INSERT INTO users (phone_number, username, phone_verified, setup_completed, fingerprint_data, public_visibility) 
+	query := `INSERT INTO users (phone_number, username, phone_verified, setup_completed, public_visibility, primary_device_id) 
 	          VALUES ($1, $2, $3, $4, $5, $6) 
 	          RETURNING id, created_at, updated_at`
 
 	err := r.db.QueryRowContext(ctx, query,
-		user.PhoneNumber, user.Username, user.PhoneVerified, user.SetupCompleted,
-		user.FingerprintData, user.PublicVisibility,
+		user.PhoneNumber, user.Username, user.PhoneVerified,
+		user.SetupCompleted, user.PublicVisibility, user.PrimaryDeviceID,
 	).Scan(&user.ID, &user.CreatedAt, &user.UpdatedAt)
 
 	return err
 }
 
 func (r *CockroachUserRepository) UpdateUser(ctx context.Context, id uuid.UUID, updates map[string]interface{}) error {
-    query := `UPDATE users SET phone_number = $1, username = $2, phone_verified = $3, setup_completed = $4, 
-              fingerprint_data = $5, public_visibility = $6, last_login_at = $7, updated_at = NOW() 
+	query := `UPDATE users SET phone_number = $1, username = $2, phone_verified = $3, setup_completed = $4, 
+              public_visibility = $5, last_login_at = $6, primary_device_id = $7, updated_at = NOW() 
               WHERE id = $8`
 
-    // Extract values from the updates map
-    _, err := r.db.ExecContext(ctx, query,
-        updates["phone_number"],     // $1
-        updates["username"],         // $2
-        updates["phone_verified"],   // $3
-        updates["setup_completed"],  // $4
-        updates["fingerprint_data"], // $5
-        updates["public_visibility"],// $6
-        updates["last_login_at"],    // $7
-        id,                          // $8 (using the id parameter instead of user.ID)
-    )
+	_, err := r.db.ExecContext(ctx, query,
+		updates["phone_number"],     // $1
+		updates["username"],         // $2
+		updates["phone_verified"],   // $3
+		updates["setup_completed"],  // $4
+		updates["public_visibility"],// $5
+		updates["last_login_at"],    // $6
+		updates["primary_device_id"],// $7
+		id,                          // $8
+	)
 
-    return err
+	return err
 }
 
 // UpdateUserFields updates specific fields of a user

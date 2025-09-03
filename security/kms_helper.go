@@ -38,6 +38,8 @@ type KMSClient interface {
 
 type KMSConfig struct {
 	KeyID             string
+	LocalSecret        string        // <-- add this
+
 	EncryptionContext map[string]string
 	Timeout           time.Duration
 
@@ -131,10 +133,38 @@ type DataKey struct {
 }
 
 // Generate a symmetric data key (e.g., AES-256) for envelope encryption.
+// GenerateDataKey generates a symmetric data key (AES-256) for envelope encryption.
+// In "local" mode, it returns a static key from config without calling AWS KMS.
 func (h *Helper) GenerateDataKey(ctx context.Context, keySpec kmstypes.DataKeySpec) (*DataKey, error) {
 	if h.cfg.KeyID == "" {
 		return nil, errors.New("kms: KeyID required for GenerateDataKey")
 	}
+
+	// ✅ Local dev mode: just return a static key
+	if h.cfg.KeyID == "local" {
+		// If no LocalSecret configured, fallback to default
+		localKey := []byte(h.cfg.LocalSecret)
+		if len(localKey) == 0 {
+			localKey = []byte("change-this-local-secret-key-32bytes!")
+		}
+
+		// Ensure key length matches AES-256 (32 bytes)
+		if len(localKey) < 32 {
+			// pad with zeros if too short
+			padded := make([]byte, 32)
+			copy(padded, localKey)
+			localKey = padded
+		} else if len(localKey) > 32 {
+			localKey = localKey[:32]
+		}
+
+		return &DataKey{
+			Plaintext:     localKey,
+			CiphertextB64: base64.StdEncoding.EncodeToString(localKey),
+		}, nil
+	}
+
+	// ✅ AWS KMS path
 	cctx, cancel := context.WithTimeout(ctx, h.cfg.Timeout)
 	defer cancel()
 
@@ -154,6 +184,7 @@ func (h *Helper) GenerateDataKey(ctx context.Context, keySpec kmstypes.DataKeySp
 		CiphertextB64: base64.StdEncoding.EncodeToString(out.CiphertextBlob),
 	}, nil
 }
+
 
 // Decrypt a stored data key back into plaintext (remember to wipe).
 func (h *Helper) DecryptDataKey(ctx context.Context, ciphertextB64 string) ([]byte, error) {

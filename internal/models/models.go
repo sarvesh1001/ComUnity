@@ -124,18 +124,21 @@ type School struct {
 }
 
 // User model
+// User model
 type User struct {
-	ID                uuid.UUID `gorm:"type:uuid;primary_key;default:gen_random_uuid()"`
-	PhoneNumber       string    `gorm:"size:15;uniqueIndex;not null"`
-	Username          *string   `gorm:"size:50;uniqueIndex"`
-	PhoneVerified     bool      `gorm:"default:false"`
-	LastLoginAt       *time.Time `gorm:"index"` // Add this field
+    ID               uuid.UUID   `gorm:"type:uuid;primary_key;default:gen_random_uuid()"`
+    PhoneNumber      string      `gorm:"size:15;uniqueIndex;not null"`
+    Username         *string     `gorm:"size:50;uniqueIndex"`
+    PhoneVerified    bool        `gorm:"default:false"`
+    LastLoginAt      *time.Time  `gorm:"index"`
+    SetupCompleted   bool        `gorm:"default:false"`
+    PublicVisibility bool        `gorm:"default:false"`
 
-	SetupCompleted    bool      `gorm:"default:false"`
-	FingerprintData   []byte    `gorm:"type:bytea"`
-	PublicVisibility  bool      `gorm:"default:false"`
-	CreatedAt         time.Time `gorm:"not null"`
-	UpdatedAt         time.Time `gorm:"not null"`
+    // ✅ Replaces FingerprintData JSONB
+    PrimaryDeviceID  *uuid.UUID  `gorm:"type:uuid;index"`
+
+    CreatedAt        time.Time   `gorm:"not null"`
+    UpdatedAt        time.Time   `gorm:"not null"`
 }
 
 // Community model

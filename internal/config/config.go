@@ -24,6 +24,18 @@ type Config struct {
         ForceRedirect     bool     `yaml:"force_redirect"`
         TrustProxyHeader  bool     `yaml:"trust_proxy_header"`
     } `yaml:"tls"`
+        
+
+    JWT struct {
+        AccessTokenDuration  time.Duration `yaml:"access_token_duration" env:"JWT_ACCESS_DURATION"`
+        RefreshTokenDuration time.Duration `yaml:"refresh_token_duration" env:"JWT_REFRESH_DURATION"`
+        IDTokenDuration      time.Duration `yaml:"id_token_duration" env:"JWT_ID_DURATION"`
+        Issuer               string        `yaml:"issuer" env:"JWT_ISSUER"`
+        Audience             []string      `yaml:"audience" env:"JWT_AUDIENCE"`
+        MaxCommunityRoles    int           `yaml:"max_community_roles" env:"JWT_MAX_ROLES"`
+      }  `yaml:"jwt"`
+
+
 
     KMS struct {
         KeyID               string            `yaml:"key_id" env:"KMS_KEY_ID"`

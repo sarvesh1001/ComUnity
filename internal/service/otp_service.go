@@ -12,11 +12,12 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
-	"strings"
+	
 	"time"
 	"github.com/ComUnity/auth-service/internal/config"
 
 	client "github.com/ComUnity/auth-service/internal/client"
+	"github.com/ComUnity/auth-service/internal/util"
 	"github.com/ComUnity/auth-service/internal/util/logger"
 )
 
@@ -32,7 +33,6 @@ var (
 )
 
 type OTPConfig = config.OTPConfig
-
 
 type OTPData struct {
 	Code      string    `json:"code"`
@@ -82,8 +82,8 @@ func (s *OTPService) Config() OTPConfig {
 // ------------------ Public Methods ------------------
 
 func (s *OTPService) GenerateOTP(ctx context.Context, phone, ip, purpose string) (string, error) {
-	normalized := normalizePhone(phone)
-	if !isValidIndianPhone(normalized) {
+	normalized := util.NormalizePhone(phone)
+	if !util.IsValidIndianPhone(normalized) {
 		return "", ErrInvalidPhone
 	}
 	if blocked, _ := s.isBlocked(ctx, normalized); blocked {
@@ -129,7 +129,7 @@ func (s *OTPService) GenerateOTP(ctx context.Context, phone, ip, purpose string)
 }
 
 func (s *OTPService) VerifyOTP(ctx context.Context, phone, code, purpose, ip string) (bool, error) {
-	normalized := normalizePhone(phone)
+	normalized := util.NormalizePhone(phone)
 	if blocked, _ := s.isBlocked(ctx, normalized); blocked {
 		return false, ErrPhoneBlocked
 	}
@@ -164,6 +164,19 @@ func (s *OTPService) VerifyOTP(ctx context.Context, phone, code, purpose, ip str
 
 	s.cleanupOTP(ctx, normalized)
 	return true, nil
+}
+
+// SetRecentVerified sets the recent_verified flag for login handler
+func (s *OTPService) SetRecentVerified(ctx context.Context, phone string) error {
+    normalized := util.NormalizePhone(phone)
+    key := "recent_verified:" + normalized
+    ttl := s.config.Expiration
+    logger.Infof("Setting Redis key %s with TTL=%v", key, ttl)
+    err := s.redis.SetEx(ctx, key, "1", ttl).Err()
+    if err != nil {
+        logger.Errorf("Redis SetEx failed for %s: %v", key, err)
+    }
+    return err
 }
 
 // ------------------ Redis Helper Methods ------------------
@@ -230,20 +243,6 @@ func (s *OTPService) updateCounters(ctx context.Context, phone string) {
 }
 
 // ------------------ Utility ------------------
-
-func normalizePhone(phone string) string {
-	var sb strings.Builder
-	for _, r := range phone {
-		if r >= '0' && r <= '9' {
-			sb.WriteRune(r)
-		}
-	}
-	return strings.TrimPrefix(sb.String(), "0")
-}
-
-func isValidIndianPhone(phone string) bool {
-	return len(phone) == 10 && phone[0] >= '6' && phone[0] <= '9'
-}
 
 func phoneHash(secret, phone string) string {
 	mac := hmac.New(sha256.New, []byte(secret))

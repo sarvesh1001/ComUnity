@@ -1,8 +1,8 @@
 
 env: development
-port: 8080
+port: 8443
+database_url: "postgres://user:pass@auth-postgres:5432/authdb?sslmode=disable"
 
-database_url: "postgres://user:pass@postgres:5432/authdb?sslmode=disable"
 redis_url: "redis://redis:6379"
 kafka_brokers: "kafka:9092"
 aadhaar_api_key: ""
@@ -29,7 +29,9 @@ tls:
   trust_proxy_header: true
 
 kms:
-  key_id: ""
+  key_id: "local"
+  local_secret: "super-secret-dev-key-change-me"
+
   timeout_ms: 10000
   public_key_cache_ttl_ms: 86400000
   encryption_context:
@@ -73,6 +75,7 @@ fingerprint:
   ua_cache_ttl: 5m
 
 
+
 # Certificate rotation policy
 certificate_policy:
   rotation_days: 90
@@ -89,7 +92,7 @@ certificate_policy:
     - "serverAuth"
   backup_count: 5
   encryption:
-    kms_key: "alias/authservice-kms-key"
+    kms_key: "local"
   monitoring:
     expiry_param: "/authservice/cert_expiry"
     alert_days: [60, 30, 15, 7, 3, 1]

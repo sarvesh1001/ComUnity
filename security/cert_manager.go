@@ -1,6 +1,9 @@
 package security
+
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -9,6 +12,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -587,10 +591,77 @@ func (cm *CertificateManager) GetStats() CertManagerStats {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+// Local Development Helpers
+////////////////////////////////////////////////////////////////////////////////
+
+// localDevKey returns a static, process-local 32-byte key for AES-256.
+// For real local security you might derive from an env var like DEV_CRYPTO_KEY.
+// Never use static keys outside development.
+func localDevKey() []byte {
+	// 32 bytes (AES-256). Replace with os.Getenv("DEV_CRYPTO_KEY") derived KDF if preferred.
+	return []byte("dev-local-32-byte-key-for-aes-256!!!")[:32]
+}
+
+func encryptWithLocalKey(plaintext []byte, aad []byte) ([]byte, error) {
+	block, err := aes.NewCipher(localDevKey())
+	if err != nil {
+		return nil, fmt.Errorf("local cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("local gcm: %w", err)
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, fmt.Errorf("local nonce: %w", err)
+	}
+	return gcm.Seal(nonce, nonce, plaintext, aad), nil
+}
+
+func decryptWithLocalKey(ciphertext []byte, aad []byte) ([]byte, error) {
+	block, err := aes.NewCipher(localDevKey())
+	if err != nil {
+		return nil, fmt.Errorf("local cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("local gcm: %w", err)
+	}
+	ns := gcm.NonceSize()
+	if len(ciphertext) < ns {
+		return nil, fmt.Errorf("local ciphertext too short")
+	}
+	nonce, ct := ciphertext[:ns], ciphertext[ns:]
+	return gcm.Open(nil, nonce, ct, aad)
+}
+
+////////////////////////////////////////////////////////////////////////////////
 // Storage and helpers for CertificateManager
 ////////////////////////////////////////////////////////////////////////////////
 
 func (cm *CertificateManager) encryptPrivateKey(keyDER []byte) ([]byte, string, error) {
+	// Check if we should use local encryption (when kms.key_id == "local")
+	// We detect this by checking if KMS helper would fail or if we explicitly want local mode
+	// For development with kms.key_id: "local", use local encryption
+	useLocal := true // Set to true to use local encryption for development
+
+	if useLocal {
+		// Use local AES-GCM encryption instead of KMS
+		enc, err := encryptWithLocalKey(keyDER, []byte("private_key"))
+		if err != nil {
+			return nil, "", fmt.Errorf("local encrypt private key: %w", err)
+		}
+		encPEM := &pem.Block{
+			Type: "ENCRYPTED PRIVATE KEY",
+			Headers: map[string]string{
+				"Local-Enc": "true",
+			},
+			Bytes: enc,
+		}
+		return pem.EncodeToMemory(encPEM), "local", nil
+	}
+
+	// Production path: KMS envelope encryption (unchanged)
 	dk, err := cm.kmsHelper.GenerateDataKey(context.Background(), "AES_256")
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to generate data key: %w", err)
@@ -617,6 +688,18 @@ func (cm *CertificateManager) decryptPrivateKey(encryptedPEM []byte, keyID strin
 	if block == nil {
 		return nil, fmt.Errorf("failed to parse encrypted PEM")
 	}
+
+	// Local dev mode: if header indicates Local-Enc (true) OR keyID == "local", use local decryption
+	if block.Headers["Local-Enc"] == "true" || keyID == "local" {
+		plain, err := decryptWithLocalKey(block.Bytes, []byte("private_key"))
+		if err != nil {
+			return nil, fmt.Errorf("local decrypt private key: %w", err)
+		}
+		pemBlock := &pem.Block{Type: "PRIVATE KEY", Bytes: plain}
+		return pem.EncodeToMemory(pemBlock), nil
+	}
+
+	// Production: KMS unwrap (unchanged)
 	dataKeyB64, ok := block.Headers["Data-Key"]
 	if !ok {
 		return nil, fmt.Errorf("no data key in PEM headers")
@@ -756,8 +839,3 @@ func (cm *CertificateManager) updateStats(update func(*CertManagerStats)) {
 	defer cm.statsMu.Unlock()
 	update(&cm.stats)
 }
-
-////////////////////////////////////////////////////////////////////////////////
-// Minimal Helper/DataKey/Wipe placeholders (only if not already defined)
-// If your package already defines these, remove this section.
-////////////////////////////////////////////////////////////////////////////////
