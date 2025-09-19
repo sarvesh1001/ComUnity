@@ -746,3 +746,28 @@ func (tr *TokenRotator) RevokeUserToken(ctx context.Context, userID uuid.UUID, t
     // Remove from active tokens
     return tr.UnregisterToken(ctx, tokenID, userID)
 }
+// RevokeToken immediately revokes a JWT token and associated session
+func (tr *TokenRotator) RevokeToken(ctx context.Context, tokenID string) error {
+    // Mark token as revoked immediately
+    revocationKey := fmt.Sprintf("token:revoke:%s", tokenID)
+    revocationData := models.JSONMap{
+        "token_id":    tokenID,
+        "revoked_at":  time.Now(),
+        "reason":      "manual_revocation",
+    }
+    
+    if err := tr.redis.SetJSON(ctx, revocationKey, revocationData, 24*time.Hour); err != nil {
+        return fmt.Errorf("failed to revoke token: %w", err)
+    }
+    
+    // Remove hybrid mapping
+    hybridKey := fmt.Sprintf("hybrid_session:%s", tokenID)
+    _ = tr.redis.Del(ctx, hybridKey).Err()
+    
+    // Remove from active tokens
+    tokenKey := fmt.Sprintf("token:active:%s", tokenID)
+    _ = tr.redis.Del(ctx, tokenKey).Err()
+    
+    logger.Info("Token revoked", "token_id", tokenID)
+    return nil
+}

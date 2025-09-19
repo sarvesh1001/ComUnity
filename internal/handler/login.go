@@ -192,47 +192,63 @@ func (h *LoginHandler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 9. Issue tokens
-	authz := &models.AuthzContext{Attributes: map[string]interface{}{"user_id": user.ID}}
-	at, rt, sid, err := h.jwtManager.IssueTokens(ctx, authz, deviceKey)
-	if err != nil {
-		h.writeError(w, http.StatusInternalServerError, "Token generation failed")
-		return
+		authz := &models.AuthzContext{Attributes: map[string]interface{}{"user_id": user.ID}}
+		accessToken, refreshToken, _, err := h.jwtManager.IssueTokens(ctx, authz, deviceKey)
+		if err != nil {
+			h.writeError(w, http.StatusInternalServerError, "Token generation failed")
+			return
+		}
+	
+		// Parse access token to extract TokenID
+		claims, err := h.jwtManager.ValidateToken(accessToken)
+		if err != nil {
+			h.writeError(w, http.StatusInternalServerError, "Failed to parse access token")
+			return
+		}
+		tokenID := claims.TokenID
+	
+		// Register token for rotation
+		h.tokenRotator.RegisterToken(ctx, tokenID, user.ID,
+			util.AccessToken, deviceKey, "", claims.ExpiresAt.Time, 0)
+	
+		// 10. Create session AND hybrid mapping
+		sessionData := models.JSONMap{"login_time": time.Now(), "device_key": deviceKey}
+		var sessionID string
+		if sess, err := h.sessionEncryptor.CreateSession(ctx, user.ID, sessionData); err == nil {
+			http.SetCookie(w, h.sessionEncryptor.CreateSessionCookie(sess))
+			sessionID = sess.SessionID
+	
+			// Create hybrid mapping using JWT TokenID
+			hybridKey := fmt.Sprintf("hybrid_session:%s", tokenID)
+			if err := h.redisClient.Set(ctx, hybridKey, sessionID, h.sessionEncryptor.Config().SessionDuration).Err(); err != nil {
+				logger.Errorf("Failed to create hybrid mapping: %v", err)
+			} else {
+				logger.Infof("Hybrid mapping created: %s -> %s", hybridKey, sessionID)
+			}
+		}
+	
+		// 11. Build response
+		userInfo := map[string]interface{}{"id": user.ID, "phone": user.PhoneNumber, "verified": user.PhoneVerified}
+		h.writeJSON(w, http.StatusOK, LoginResponse{
+			Status:       "success",
+			Message:      "Login successful",
+			AccessToken:  accessToken,
+			RefreshToken: refreshToken,
+			TokenType:    "Bearer",
+			ExpiresIn:    900,
+			SessionID:    sessionID,
+			User:         &userInfo,
+			DeviceInfo: &DeviceInfo{
+				DeviceKey:      deviceKey,
+				Platform:       fp.Platform,
+				IsAutoDetected: fp.IsAutoDetected,
+				StabilityScore: fp.StabilityScore,
+				TrustLevel:     deviceRecord.TrustLevel,
+				RiskScore:      deviceRecord.RiskScore,
+				FirstSeen:      isFirstSeen,
+			},
+		})
 	}
-	if claims, e := h.jwtManager.ValidateToken(at); e == nil {
-		h.tokenRotator.RegisterToken(ctx, claims.TokenID, user.ID,
-			util.AccessToken, deviceKey, sid, claims.ExpiresAt.Time, 0)
-	}
-
-	// 10. Create session
-	sessionData := models.JSONMap{"login_time": time.Now(), "device_key": deviceKey}
-	var sessionID string
-	if sess, e := h.sessionEncryptor.CreateSession(ctx, user.ID, sessionData); e == nil {
-		http.SetCookie(w, h.sessionEncryptor.CreateSessionCookie(sess))
-		sessionID = sess.SessionID
-	}
-
-	// 11. Build response
-	userInfo := map[string]interface{}{"id": user.ID, "phone": user.PhoneNumber, "verified": user.PhoneVerified}
-	h.writeJSON(w, http.StatusOK, LoginResponse{
-		Status:       "success",
-		Message:      "Login successful",
-		AccessToken:  at,
-		RefreshToken: rt,
-		TokenType:    "Bearer",
-		ExpiresIn:    900,
-		SessionID:    sessionID,
-		User:         &userInfo,
-		DeviceInfo: &DeviceInfo{
-			DeviceKey:      deviceKey,
-			Platform:       fp.Platform,
-			IsAutoDetected: fp.IsAutoDetected,
-			StabilityScore: fp.StabilityScore,
-			TrustLevel:     deviceRecord.TrustLevel,
-			RiskScore:      deviceRecord.RiskScore,
-			FirstSeen:      isFirstSeen,
-		},
-	})
-}
 
 func (h *LoginHandler) writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")

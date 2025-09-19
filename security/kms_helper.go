@@ -135,76 +135,10 @@ type DataKey struct {
 // Generate a symmetric data key (e.g., AES-256) for envelope encryption.
 // GenerateDataKey generates a symmetric data key (AES-256) for envelope encryption.
 // In "local" mode, it returns a static key from config without calling AWS KMS.
-func (h *Helper) GenerateDataKey(ctx context.Context, keySpec kmstypes.DataKeySpec) (*DataKey, error) {
-	if h.cfg.KeyID == "" {
-		return nil, errors.New("kms: KeyID required for GenerateDataKey")
-	}
-
-	// ✅ Local dev mode: just return a static key
-	if h.cfg.KeyID == "local" {
-		// If no LocalSecret configured, fallback to default
-		localKey := []byte(h.cfg.LocalSecret)
-		if len(localKey) == 0 {
-			localKey = []byte("change-this-local-secret-key-32bytes!")
-		}
-
-		// Ensure key length matches AES-256 (32 bytes)
-		if len(localKey) < 32 {
-			// pad with zeros if too short
-			padded := make([]byte, 32)
-			copy(padded, localKey)
-			localKey = padded
-		} else if len(localKey) > 32 {
-			localKey = localKey[:32]
-		}
-
-		return &DataKey{
-			Plaintext:     localKey,
-			CiphertextB64: base64.StdEncoding.EncodeToString(localKey),
-		}, nil
-	}
-
-	// ✅ AWS KMS path
-	cctx, cancel := context.WithTimeout(ctx, h.cfg.Timeout)
-	defer cancel()
-
-	in := &kms.GenerateDataKeyInput{
-		KeyId:   aws.String(h.cfg.KeyID),
-		KeySpec: keySpec,
-	}
-	if len(h.cfg.EncryptionContext) > 0 {
-		in.EncryptionContext = h.cfg.EncryptionContext
-	}
-	out, err := h.client.GenerateDataKey(cctx, in)
-	if err != nil {
-		return nil, fmt.Errorf("kms GenerateDataKey: %w", err)
-	}
-	return &DataKey{
-		Plaintext:     out.Plaintext,
-		CiphertextB64: base64.StdEncoding.EncodeToString(out.CiphertextBlob),
-	}, nil
-}
 
 
 // Decrypt a stored data key back into plaintext (remember to wipe).
-func (h *Helper) DecryptDataKey(ctx context.Context, ciphertextB64 string) ([]byte, error) {
-	raw, err := base64.StdEncoding.DecodeString(ciphertextB64)
-	if err != nil {
-		return nil, fmt.Errorf("kms DecryptDataKey: base64: %w", err)
-	}
-	cctx, cancel := context.WithTimeout(ctx, h.cfg.Timeout)
-	defer cancel()
-
-	in := &kms.DecryptInput{CiphertextBlob: raw}
-	if len(h.cfg.EncryptionContext) > 0 {
-		in.EncryptionContext = h.cfg.EncryptionContext
-	}
-	out, err := h.client.Decrypt(cctx, in)
-	if err != nil {
-		return nil, fmt.Errorf("kms DecryptDataKey: %w", err)
-	}
-	return out.Plaintext, nil
-}
+// DecryptDataKey decrypts a stored data key back into plaintext (remember to wipe).
 
 // AES-GCM helpers using a DataKey’s plaintext.
 // Ciphertext format: nonce || gcm-sealed-bytes
@@ -507,4 +441,91 @@ func (h *Helper) GenerateDataKeyForJWT(ctx context.Context, keySpec string) (int
     }
     
     return h.GenerateDataKey(ctx, spec)
+}
+
+
+// Generate a symmetric data key (AES-256) for envelope encryption.
+// In "local" mode, it returns a key from config, fallback only if empty.
+func (h *Helper) GenerateDataKey(ctx context.Context, keySpec kmstypes.DataKeySpec) (*DataKey, error) {
+	if h.cfg.KeyID == "" {
+		return nil, errors.New("kms: KeyID required for GenerateDataKey")
+	}
+
+	if h.cfg.KeyID == "local" {
+		// Prefer configured secret
+		localKey := []byte(h.cfg.LocalSecret)
+		if len(localKey) == 0 {
+			// fallback hardcoded key
+			localKey = []byte("change-this-local-secret-key-32bytes!")
+		}
+
+		// Ensure 32 bytes (AES-256)
+		if len(localKey) < 32 {
+			padded := make([]byte, 32)
+			copy(padded, localKey)
+			localKey = padded
+		} else if len(localKey) > 32 {
+			localKey = localKey[:32]
+		}
+
+		return &DataKey{
+			Plaintext:     localKey,
+			CiphertextB64: base64.StdEncoding.EncodeToString(localKey),
+		}, nil
+	}
+
+	// AWS KMS path
+	cctx, cancel := context.WithTimeout(ctx, h.cfg.Timeout)
+	defer cancel()
+
+	in := &kms.GenerateDataKeyInput{
+		KeyId:   aws.String(h.cfg.KeyID),
+		KeySpec: keySpec,
+	}
+	if len(h.cfg.EncryptionContext) > 0 {
+		in.EncryptionContext = h.cfg.EncryptionContext
+	}
+	out, err := h.client.GenerateDataKey(cctx, in)
+	if err != nil {
+		return nil, fmt.Errorf("kms GenerateDataKey: %w", err)
+	}
+	return &DataKey{
+		Plaintext:     out.Plaintext,
+		CiphertextB64: base64.StdEncoding.EncodeToString(out.CiphertextBlob),
+	}, nil
+}
+
+// Decrypt a stored data key back into plaintext
+func (h *Helper) DecryptDataKey(ctx context.Context, ciphertextB64 string) ([]byte, error) {
+	if h.cfg.KeyID == "local" {
+		keyBytes := []byte(h.cfg.LocalSecret)
+		if len(keyBytes) == 0 {
+			keyBytes = []byte("change-this-local-secret-key-32bytes!")
+		}
+		if len(keyBytes) < 32 {
+			padded := make([]byte, 32)
+			copy(padded, keyBytes)
+			keyBytes = padded
+		} else if len(keyBytes) > 32 {
+			keyBytes = keyBytes[:32]
+		}
+		return keyBytes, nil
+	}
+
+	raw, err := base64.StdEncoding.DecodeString(ciphertextB64)
+	if err != nil {
+		return nil, fmt.Errorf("kms DecryptDataKey: base64: %w", err)
+	}
+	cctx, cancel := context.WithTimeout(ctx, h.cfg.Timeout)
+	defer cancel()
+
+	in := &kms.DecryptInput{CiphertextBlob: raw}
+	if len(h.cfg.EncryptionContext) > 0 {
+		in.EncryptionContext = h.cfg.EncryptionContext
+	}
+	out, err := h.client.Decrypt(cctx, in)
+	if err != nil {
+		return nil, fmt.Errorf("kms DecryptDataKey: %w", err)
+	}
+	return out.Plaintext, nil
 }

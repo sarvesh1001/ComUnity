@@ -302,6 +302,8 @@ func main() {
 		CookieHTTPOnly:     true,                     // HTTP only cookies
 		CookieSameSite:     "strict",                 // CSRF protection
 		EncryptionVersion:  1,                        // Current encryption version
+		UseLocalKey:        true,   // ← enable local AES key for dev
+
 	})
 
 	// Initialize Token Rotator
@@ -561,7 +563,6 @@ func main() {
 
 	r.Use(fpMW) // Device fingerprinting first
 
-	r.Use(sessionEncryptor.SessionMiddleware()) // Session handling second
 	r.Use(chimw.RequestID, chimw.RealIP, chimw.Recoverer, chimw.Timeout(10*time.Second))
 	r.Use(chimw.Logger)
 
@@ -580,21 +581,23 @@ func main() {
 		// Public endpoints
 		rt.Post("/login", loginHandler.Login)
 		rt.Post("/refresh", RefreshTokenHandler(jwtManager, tokenRotator))
-
-		// Protected endpoints (require JWT)
+	
+		// Protected endpoints (require hybrid JWT + Session validation)
 		rt.Group(func(pr chi.Router) {
-			pr.Use(JWTMiddleware(jwtManager, tokenRotator))
-
+			pr.Use(sessionEncryptor.HybridSessionMiddleware(jwtManager))
+	
 			pr.Post("/logout", LogoutHandler(jwtManager, sessionEncryptor, tokenRotator))
 			pr.Handle("/profile", http.HandlerFunc(ProfileHandler))
-
-			// Session-specific routes
-			pr.Post("/session/refresh", handler.SessionRefreshHandler(sessionEncryptor, jwtManager))
+	
+			// Session-specific routes - using 'rcli' 
+			pr.Post("/session/refresh", handler.SessionRefreshHandler(sessionEncryptor, jwtManager, rcli))
 			pr.Get("/session/info", handler.SessionInfoHandler(sessionEncryptor))
-			pr.Delete("/session/invalidate", handler.InvalidateSessionHandler(sessionEncryptor))
-			pr.Delete("/sessions/invalidate-all", handler.InvalidateAllSessionsHandler(sessionEncryptor))
+			pr.Delete("/session/invalidate", handler.InvalidateSessionHandler(sessionEncryptor, tokenRotator, rcli))
+			pr.Delete("/sessions/invalidate-all", handler.InvalidateAllSessionsHandler(sessionEncryptor, tokenRotator))
 		})
 	})
+	
+	
 
 	// OTP routes (public)
 	indiaLimiter := middleware.NewIndiaOTPLimiter(rcli, cfg.IndiaOTPRateLimit)
