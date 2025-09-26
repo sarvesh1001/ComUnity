@@ -113,7 +113,7 @@ func main() {
 	if cfg.JWT.AccessTokenDuration == 0 {
 		cfg.JWT.AccessTokenDuration = 15 * time.Minute
 	}
-	// Ã¢â‚¬Â¦ repeat for other JWT fields Ã¢â‚¬Â¦
+	// ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ repeat for other JWT fields ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦
 
 	// jwtManager := util.NewJWTManager(
 	// 	util.JWTConfig{
@@ -302,7 +302,7 @@ func main() {
 		CookieHTTPOnly:     true,                     // HTTP only cookies
 		CookieSameSite:     "strict",                 // CSRF protection
 		EncryptionVersion:  1,                        // Current encryption version
-		UseLocalKey:        true,   // ← enable local AES key for dev
+		UseLocalKey:        true,   // â† enable local AES key for dev
 
 	})
 
@@ -585,8 +585,13 @@ func main() {
 		// Protected endpoints (require hybrid JWT + Session validation)
 		rt.Group(func(pr chi.Router) {
 			pr.Use(sessionEncryptor.HybridSessionMiddleware(jwtManager))
-	
-			pr.Post("/logout", LogoutHandler(jwtManager, sessionEncryptor, tokenRotator))
+			
+			
+        // âœ… ADD PROFILE ROUTES HERE
+			profileHandler := handler.NewProfileHandler(userRepo, jwtManager)
+			pr.Get("/profile/status", profileHandler.GetStatus)
+			pr.Post("/profile/setup", profileHandler.Setup)
+
 			pr.Handle("/profile", http.HandlerFunc(ProfileHandler))
 	
 			// Session-specific routes - using 'rcli' 
@@ -740,6 +745,7 @@ func main() {
 	r.Route("/rbac", func(r chi.Router) {
 		// Apply JWT authentication middleware to all RBAC routes
 		r.Use(JWTMiddleware(jwtManager, tokenRotator))
+		r.Use(middleware.RequireSetupCompleted)  // âœ… ADD THIS LINE - Block incomplete profiles
 
 		// Role management
 
@@ -769,6 +775,7 @@ func main() {
 		// Apply JWT authentication and community context middleware
 		r.Use(JWTMiddleware(jwtManager, tokenRotator))
 		r.Use(CommunityContextMiddleware)
+		r.Use(middleware.RequireSetupCompleted)  // âœ… ADD THIS LINE - Block incomplete profiles
 
 		// Example: Class attendance route
 		r.With(RBACMiddleware("attendance:mark:class", roleService, jwtManager)).
@@ -1317,49 +1324,6 @@ func RefreshTokenHandler(jwtManager *util.JWTManager, tokenRotator *security.Tok
 	}
 }
 
-func LogoutHandler(jwtManager *util.JWTManager, sessionEncryptor *security.SessionEncryptor, tokenRotator *security.TokenRotator) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		// Extract token and revoke it
-		authHeader := r.Header.Get("Authorization")
-		if len(authHeader) > 7 && authHeader[:7] == "Bearer " {
-			tokenString := authHeader[7:]
-			claims, err := jwtManager.ValidateToken(tokenString)
-			if err == nil {
-				// Revoke token via rotator
-				tokenRotator.RevokeUserToken(r.Context(), claims.UserContext.UserID, claims.TokenID)
-			}
-		}
-
-		// Get user ID for session invalidation
-		var userID uuid.UUID
-		if claims, ok := r.Context().Value("jwt_claims").(*util.AuthzClaims); ok {
-			userID = claims.UserContext.UserID
-			// Invalidate all user sessions
-			sessionEncryptor.InvalidateAllUserSessions(r.Context(), userID)
-		} else if sessionData, ok := security.GetSessionFromContext(r.Context()); ok {
-			userID = sessionData.UserID
-			// Invalidate all user sessions
-			sessionEncryptor.InvalidateAllUserSessions(r.Context(), userID)
-		}
-
-		// Clear session cookie
-		http.SetCookie(w, &http.Cookie{
-			Name:     "auth_session",
-			Value:    "",
-			Path:     "/",
-			Expires:  time.Unix(0, 0),
-			MaxAge:   -1,
-			HttpOnly: true,
-		})
-
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"message": "Logged out successfully"}`))
-	}
-}
-
-// Session-specific handlers
-
-// NEW COMPLIANCE HANDLERS
 
 // Audit Export Handlers
 func ComplianceAuditStatsHandler(auditExporter *audit.AuditExporter) http.HandlerFunc {
