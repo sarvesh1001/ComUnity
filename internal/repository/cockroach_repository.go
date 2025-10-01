@@ -677,13 +677,23 @@ func (r *CockroachUserRepository) GetByPhone(ctx context.Context, phoneNumber st
 	var user models.User
 	query := `SELECT id, phone_number, username, display_name, preferred_languages, verification_status,
        			phone_verified, setup_completed, public_visibility, primary_device_id, last_login_at, created_at, updated_at
-	   	          FROM users 
+	          FROM users 
 	          WHERE phone_number = $1`
 
 	err := r.db.QueryRowContext(ctx, query, phoneNumber).Scan(
-		&user.ID, &user.PhoneNumber, &user.Username, &user.PhoneVerified, &user.SetupCompleted,
-		&user.PublicVisibility, &user.PrimaryDeviceID, &user.LastLoginAt,
-		&user.CreatedAt, &user.UpdatedAt,
+		&user.ID,
+		&user.PhoneNumber,
+		&user.Username,
+		&user.DisplayName,
+		pq.Array(&user.PreferredLanguages),
+		&user.VerificationStatus,
+		&user.PhoneVerified,
+		&user.SetupCompleted,
+		&user.PublicVisibility,
+		&user.PrimaryDeviceID,
+		&user.LastLoginAt,
+		&user.CreatedAt,
+		&user.UpdatedAt,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -693,7 +703,7 @@ func (r *CockroachUserRepository) GetByPhone(ctx context.Context, phoneNumber st
 		return nil, err
 	}
 	return &user, nil
-}		
+}
 		
 
 func (r *CockroachUserRepository) GetByUsername(ctx context.Context, username string) (*models.User, error) {
@@ -704,9 +714,19 @@ func (r *CockroachUserRepository) GetByUsername(ctx context.Context, username st
 	          WHERE username = $1 AND public_visibility = true`
 
 	err := r.db.QueryRowContext(ctx, query, username).Scan(
-		&user.ID, &user.PhoneNumber, &user.Username, &user.PhoneVerified, &user.SetupCompleted,
-		&user.PublicVisibility, &user.PrimaryDeviceID, &user.LastLoginAt,
-		&user.CreatedAt, &user.UpdatedAt,
+		&user.ID,
+		&user.PhoneNumber,
+		&user.Username,
+		&user.DisplayName,
+		pq.Array(&user.PreferredLanguages),
+		&user.VerificationStatus,
+		&user.PhoneVerified,
+		&user.SetupCompleted,
+		&user.PublicVisibility,
+		&user.PrimaryDeviceID,
+		&user.LastLoginAt,
+		&user.CreatedAt,
+		&user.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -777,113 +797,6 @@ func (r *CockroachUserRepository) UpdateUserFields(ctx context.Context, userID u
 }
 
     
-// CockroachCommunityRepository implements CommunityRepository for CockroachDB
-type CockroachCommunityRepository struct {
-	db *sql.DB
-}
-
-func NewCockroachCommunityRepository(db *sql.DB) CommunityRepository {
-	return &CockroachCommunityRepository{db: db}
-}
-
-func (r *CockroachCommunityRepository) GetByID(ctx context.Context, communityID uuid.UUID) (*models.Community, error) {
-	var community models.Community
-	query := `SELECT id, name, type, is_private, head_user_id, verification_status, payment_status, created_at, updated_at 
-	          FROM communities 
-	          WHERE id = $1`
-
-	err := r.db.QueryRowContext(ctx, query, communityID).Scan(
-		&community.ID, &community.Name, &community.Type, &community.IsPrivate, &community.HeadUserID,
-		&community.VerificationStatus, &community.PaymentStatus, &community.CreatedAt, &community.UpdatedAt,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	return &community, nil
-}
-
-func (r *CockroachCommunityRepository) CreateCommunity(ctx context.Context, community *models.Community) error {
-	query := `INSERT INTO communities (name, type, is_private, head_user_id, verification_status, payment_status) 
-	          VALUES ($1, $2, $3, $4, $5, $6) 
-	          RETURNING id, created_at, updated_at`
-
-	err := r.db.QueryRowContext(ctx, query,
-		community.Name, community.Type, community.IsPrivate, community.HeadUserID,
-		community.VerificationStatus, community.PaymentStatus,
-	).Scan(&community.ID, &community.CreatedAt, &community.UpdatedAt)
-
-	return err
-}
-
-func (r *CockroachCommunityRepository) UpdateCommunity(ctx context.Context, community *models.Community) error {
-	query := `UPDATE communities SET name = $1, type = $2, is_private = $3, head_user_id = $4, verification_status = $5, payment_status = $6, updated_at = NOW() 
-	          WHERE id = $7`
-
-	_, err := r.db.ExecContext(ctx, query,
-		community.Name, community.Type, community.IsPrivate, community.HeadUserID,
-		community.VerificationStatus, community.PaymentStatus, community.ID,
-	)
-
-	return err
-}
-
-func (r *CockroachCommunityRepository) GetCommunitiesByType(ctx context.Context, communityType string) ([]models.Community, error) {
-	query := `SELECT id, name, type, is_private, head_user_id, verification_status, payment_status, created_at, updated_at 
-	          FROM communities 
-	          WHERE type = $1`
-
-	rows, err := r.db.QueryContext(ctx, query, communityType)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var communities []models.Community
-	for rows.Next() {
-		var community models.Community
-		err := rows.Scan(
-			&community.ID, &community.Name, &community.Type, &community.IsPrivate, &community.HeadUserID,
-			&community.VerificationStatus, &community.PaymentStatus, &community.CreatedAt, &community.UpdatedAt,
-		)
-		if err != nil {
-			return nil, err
-		}
-		communities = append(communities, community)
-	}
-
-	return communities, nil
-}
-
-func (r *CockroachCommunityRepository) GetUserCommunities(ctx context.Context, userID uuid.UUID) ([]models.Community, error) {
-	query := `SELECT c.id, c.name, c.type, c.is_private, c.head_user_id, c.verification_status, c.payment_status, c.created_at, c.updated_at 
-	          FROM communities c 
-	          JOIN user_roles ur ON c.id = ur.community_id 
-	          WHERE ur.user_id = $1 AND ur.status = 'ACTIVE' 
-	          GROUP BY c.id, c.name, c.type, c.is_private, c.head_user_id, c.verification_status, c.payment_status, c.created_at, c.updated_at`
-
-	rows, err := r.db.QueryContext(ctx, query, userID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var communities []models.Community
-	for rows.Next() {
-		var community models.Community
-		err := rows.Scan(
-			&community.ID, &community.Name, &community.Type, &community.IsPrivate, &community.HeadUserID,
-			&community.VerificationStatus, &community.PaymentStatus, &community.CreatedAt, &community.UpdatedAt,
-		)
-		if err != nil {
-			return nil, err
-		}
-		communities = append(communities, community)
-	}
-
-	return communities, nil
-}
-
 // CockroachConsentRepository implements ConsentRepository for CockroachDB
 type CockroachConsentRepository struct {
 	db *sql.DB

@@ -154,16 +154,3 @@ type User struct {
     UpdatedAt        time.Time   `gorm:"not null"`
 }
 
-
-// Community model
-type Community struct {
-    ID                 uuid.UUID `gorm:"type:uuid;primary_key;default:gen_random_uuid()"`
-    Name               string    `gorm:"size:100;not null"`
-    Type               string    `gorm:"size:50;not null"` // SCHOOL, SOCIETY, GOVERNMENT, PUBLIC, BUSINESS
-    IsPrivate          bool      `gorm:"default:false"`
-    HeadUserID         uuid.UUID `gorm:"type:uuid;not null"`
-    VerificationStatus string    `gorm:"size:20;default:'PENDING'"` // PENDING, VERIFIED, REJECTED
-    PaymentStatus      string    `gorm:"size:20;default:'UNPAID'"` // PAID, UNPAID, TRIAL
-    CreatedAt          time.Time `gorm:"not null"`
-    UpdatedAt          time.Time `gorm:"not null"`
-} 

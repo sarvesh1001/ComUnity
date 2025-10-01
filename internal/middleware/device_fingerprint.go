@@ -30,18 +30,19 @@ const (
 )
 
 const (
-    headerTelemetryID      = "X-Telemetry-Id"
-    headerDeviceInstanceID = "X-Device-Instance-Id"
-    headerPlatform         = "X-Platform"    // ios|android|web
-    headerAppVersion       = "X-App-Version" // semver
-    headerDeviceFingerprint = "X-Device-Fingerprint" // Client-generated fingerprint
+    headerTelemetryID       = "X-Telemetry-Id"
+    headerDeviceInstanceID  = "X-Device-Instance-Id"
+    headerPlatform          = "X-Platform"             // ios|android|web
+    headerAppVersion        = "X-App-Version"          // semver
+    headerDeviceFingerprint = "X-Device-Fingerprint"   // Client-generated fingerprint
+    headerDeviceKeyAlias    = "X-Device-Key"           // Alias header commonly used by clients
 )
 
 // Device identification patterns
 var (
     mobileUserAgentRegex = regexp.MustCompile(`(?i)(iPhone|iPad|Android|Mobile)`)
     browserRegex         = regexp.MustCompile(`(?i)(Chrome|Firefox|Safari|Edge|Opera)/([\d.]+)`)
-    osRegex             = regexp.MustCompile(`(?i)(Windows|Mac OS|Linux|Android|iOS)`)
+    osRegex              = regexp.MustCompile(`(?i)(Windows|Mac OS|Linux|Android|iOS)`)
 )
 
 // ==============================
@@ -65,8 +66,8 @@ type DeviceFPConfig struct {
     ServerPepper          []byte
     ContextDeadline       time.Duration
     UACacheTTL            time.Duration
-    EnableAutoDetection   bool // NEW: Enable automatic device detection
-    StabilityWindow       time.Duration // NEW: How long to keep device stable
+    EnableAutoDetection   bool
+    StabilityWindow       time.Duration
 }
 
 // Enhanced DeviceFingerprint with auto-detection
@@ -76,18 +77,17 @@ type DeviceFingerprint struct {
     DeviceInstanceIDHash string
     UAHash               string
     IPBucket             string
-    Platform             string // normalized
-    AppVersion           string // normalized semver
+    Platform             string
+    AppVersion           string
     ObservedAt           time.Time
-    
-    // Enhanced fields for automatic detection
-    IsAutoDetected       bool   `json:"is_auto_detected"`
-    BrowserFingerprint   string `json:"browser_fingerprint,omitempty"`
-    OSFingerprint        string `json:"os_fingerprint,omitempty"`
-    ScreenFingerprint    string `json:"screen_fingerprint,omitempty"`
-    TimezoneOffset       string `json:"timezone_offset,omitempty"`
-    Language             string `json:"language,omitempty"`
-    StabilityScore       float64 `json:"stability_score"` // 0.0-1.0 how stable this device appears
+
+    IsAutoDetected     bool    `json:"is_auto_detected"`
+    BrowserFingerprint string  `json:"browser_fingerprint,omitempty"`
+    OSFingerprint      string  `json:"os_fingerprint,omitempty"`
+    ScreenFingerprint  string  `json:"screen_fingerprint,omitempty"`
+    TimezoneOffset     string  `json:"timezone_offset,omitempty"`
+    Language           string  `json:"language,omitempty"`
+    StabilityScore     float64 `json:"stability_score"`
 }
 
 // ==============================
@@ -116,21 +116,19 @@ func (cfg *DeviceFPConfig) Validate() error {
 }
 
 // ==============================
-// Enhanced Middleware
+/* Enhanced Middleware */
 // ==============================
 
 func DeviceFingerprintMiddleware(cfg DeviceFPConfig) func(next http.Handler) http.Handler {
-    // Validate early to fail fast at startup.
     if err := cfg.Validate(); err != nil {
         panic(err)
     }
 
     proxyNets := mustParseCIDRs(cfg.TrustedProxyCIDRs)
     uaCache := newUACache(cfg.UACacheTTL)
-    
-    // Set defaults
+
     if cfg.StabilityWindow == 0 {
-        cfg.StabilityWindow = 24 * time.Hour // 24 hours stability window
+        cfg.StabilityWindow = 24 * time.Hour
     }
 
     return func(next http.Handler) http.Handler {
@@ -142,23 +140,21 @@ func DeviceFingerprintMiddleware(cfg DeviceFPConfig) func(next http.Handler) htt
                 defer cancel()
             }
 
-            // Extract all possible device signals
+            // Extract signals (now includes explicit device key)
             signals := extractDeviceSignals(r)
-            
+
             // Resolve client IP with trusted proxy validation
             ip := clientIP(r, cfg.TrustedProxyIPHeaders, proxyNets)
             signals.IP = ip.String()
-            
-            // Generate/enhance device fingerprint
+
+            // Generate/enhance device fingerprint (prefers explicit key)
             fp := generateEnhancedFingerprint(signals, cfg, uaCache)
-            
-            // Log for debugging
+
             if cfg.EnableAutoDetection {
-                logger.Infof("Device fingerprint: key=%s, auto=%v, platform=%s, stability=%.2f", 
-                    fp.DeviceKey[:12]+"...", fp.IsAutoDetected, fp.Platform, fp.StabilityScore)
+                logger.Infof("Device fingerprint: key=%s, auto=%v, platform=%s, stability=%.2f",
+                    safePrefix(fp.DeviceKey, 12), fp.IsAutoDetected, fp.Platform, fp.StabilityScore)
             }
 
-            // Attach to context
             ctx = context.WithValue(ctx, ctxDeviceFingerprintKey, fp)
             next.ServeHTTP(w, r.WithContext(ctx))
         })
@@ -171,56 +167,58 @@ func DeviceFingerprintMiddleware(cfg DeviceFPConfig) func(next http.Handler) htt
 
 type DeviceSignals struct {
     // Explicit headers (preferred)
-    TelemetryID      string
-    DeviceInstanceID string
-    Platform         string
-    AppVersion       string
-    UserAgent        string
-    
+    TelemetryID       string
+    DeviceInstanceID  string
+    Platform          string
+    AppVersion        string
+    UserAgent         string
+    ExplicitDeviceKey string // NEW: client-provided device key
+
     // Auto-detected signals
-    IP               string
-    AcceptLanguage   string
-    AcceptEncoding   string
-    DNT              string // Do Not Track
-    ScreenResolution string // From custom header if available
-    TimezoneOffset   string // From custom header if available
-    
+    IP             string
+    AcceptLanguage string
+    AcceptEncoding string
+    DNT            string
+    ScreenResolution string
+    TimezoneOffset   string
+
     // Browser-specific
-    SecFetchSite     string
-    SecFetchMode     string
-    SecFetchUser     string
-    SecFetchDest     string
-    
+    SecFetchSite string
+    SecFetchMode string
+    SecFetchUser string
+    SecFetchDest string
+
     // Connection info
-    Connection       string
-    UpgradeInsecure  string
+    Connection      string
+    UpgradeInsecure string
 }
 
 func extractDeviceSignals(r *http.Request) *DeviceSignals {
+    explicitKey := sanitizeHeader(r.Header.Get(headerDeviceFingerprint), 256)
+    if explicitKey == "" {
+        explicitKey = sanitizeHeader(r.Header.Get(headerDeviceKeyAlias), 256)
+    }
     return &DeviceSignals{
-        // Explicit device headers
-        TelemetryID:      sanitizeHeader(r.Header.Get(headerTelemetryID), 512),
-        DeviceInstanceID: sanitizeHeader(r.Header.Get(headerDeviceInstanceID), 512),
-        Platform:         sanitizeHeader(r.Header.Get(headerPlatform), 64),
-        AppVersion:       sanitizeHeader(r.Header.Get(headerAppVersion), 64),
-        UserAgent:        sanitizeHeader(r.UserAgent(), 1024),
-        
-        // Browser/client signals
-        AcceptLanguage:   sanitizeHeader(r.Header.Get("Accept-Language"), 256),
-        AcceptEncoding:   sanitizeHeader(r.Header.Get("Accept-Encoding"), 256),
-        DNT:              r.Header.Get("DNT"),
-        ScreenResolution: r.Header.Get("X-Screen-Resolution"), // Custom header from client JS
-        TimezoneOffset:   r.Header.Get("X-Timezone-Offset"),  // Custom header from client JS
-        
-        // Security headers (modern browsers)
-        SecFetchSite:     r.Header.Get("Sec-Fetch-Site"),
-        SecFetchMode:     r.Header.Get("Sec-Fetch-Mode"),
-        SecFetchUser:     r.Header.Get("Sec-Fetch-User"),
-        SecFetchDest:     r.Header.Get("Sec-Fetch-Dest"),
-        
-        // Connection
-        Connection:       r.Header.Get("Connection"),
-        UpgradeInsecure:  r.Header.Get("Upgrade-Insecure-Requests"),
+        TelemetryID:       sanitizeHeader(r.Header.Get(headerTelemetryID), 512),
+        DeviceInstanceID:  sanitizeHeader(r.Header.Get(headerDeviceInstanceID), 512),
+        Platform:          sanitizeHeader(r.Header.Get(headerPlatform), 64),
+        AppVersion:        sanitizeHeader(r.Header.Get(headerAppVersion), 64),
+        UserAgent:         sanitizeHeader(r.UserAgent(), 1024),
+        ExplicitDeviceKey: explicitKey,
+
+        AcceptLanguage: sanitizeHeader(r.Header.Get("Accept-Language"), 256),
+        AcceptEncoding: sanitizeHeader(r.Header.Get("Accept-Encoding"), 256),
+        DNT:            r.Header.Get("DNT"),
+        ScreenResolution: r.Header.Get("X-Screen-Resolution"),
+        TimezoneOffset:   r.Header.Get("X-Timezone-Offset"),
+
+        SecFetchSite: r.Header.Get("Sec-Fetch-Site"),
+        SecFetchMode: r.Header.Get("Sec-Fetch-Mode"),
+        SecFetchUser: r.Header.Get("Sec-Fetch-User"),
+        SecFetchDest: r.Header.Get("Sec-Fetch-Dest"),
+
+        Connection:      r.Header.Get("Connection"),
+        UpgradeInsecure: r.Header.Get("Upgrade-Insecure-Requests"),
     }
 }
 
@@ -230,12 +228,50 @@ func extractDeviceSignals(r *http.Request) *DeviceSignals {
 
 func generateEnhancedFingerprint(signals *DeviceSignals, cfg DeviceFPConfig, uaCache *uaCache) *DeviceFingerprint {
     now := time.Now().UTC()
-    
-    // Auto-detect platform if not provided
+
+    // 1) Prefer explicit device key from client
+    if signals.ExplicitDeviceKey != "" {
+        platform := detectPlatform(signals)
+        appVersion := normalizeVersion(signals.AppVersion, signals.UserAgent)
+
+        uaHash := ""
+        if cached, ok := uaCache.Get(signals.UserAgent); ok {
+            uaHash = cached
+        } else {
+            uaHash = b64Hash([]byte(signals.UserAgent), cfg.ServerPepper)
+            uaCache.Set(signals.UserAgent, uaHash)
+        }
+
+        var ipBucket string
+        if cfg.EnableIPBucketing {
+            ipBucket = deriveIPBucket(net.ParseIP(signals.IP))
+        }
+
+        browserFP := generateBrowserFingerprint(signals, cfg.ServerPepper)
+        osFP := generateOSFingerprint(signals, cfg.ServerPepper)
+
+        return &DeviceFingerprint{
+            DeviceKey:            signals.ExplicitDeviceKey,
+            TelemetryIDHash:      ifNonEmptyHash(signals.TelemetryID, cfg.ServerPepper),
+            DeviceInstanceIDHash: ifNonEmptyHash(signals.DeviceInstanceID, cfg.ServerPepper),
+            UAHash:               uaHash,
+            IPBucket:             ipBucket,
+            Platform:             platform,
+            AppVersion:           appVersion,
+            ObservedAt:           now,
+            IsAutoDetected:       false,
+            BrowserFingerprint:   browserFP,
+            OSFingerprint:        osFP,
+            TimezoneOffset:       signals.TimezoneOffset,
+            Language:             extractPrimaryLanguage(signals.AcceptLanguage),
+            StabilityScore:       1.0,
+        }
+    }
+
+    // 2) Auto-detection path (unchanged behavior)
     platform := detectPlatform(signals)
     appVersion := normalizeVersion(signals.AppVersion, signals.UserAgent)
-    
-    // Generate various fingerprint components
+
     uaHash := ""
     if cached, ok := uaCache.Get(signals.UserAgent); ok {
         uaHash = cached
@@ -249,25 +285,14 @@ func generateEnhancedFingerprint(signals *DeviceSignals, cfg DeviceFPConfig, uaC
         ipBucket = deriveIPBucket(net.ParseIP(signals.IP))
     }
 
-    // Generate browser-specific fingerprints
     browserFP := generateBrowserFingerprint(signals, cfg.ServerPepper)
     osFP := generateOSFingerprint(signals, cfg.ServerPepper)
-    
-    // Hash IDs if provided
-    telemetryHash := ""
-    if signals.TelemetryID != "" {
-        telemetryHash = b64Hash([]byte(signals.TelemetryID), cfg.ServerPepper)
-    }
 
-    deviceInstanceHash := ""
-    if signals.DeviceInstanceID != "" {
-        deviceInstanceHash = b64Hash([]byte(signals.DeviceInstanceID), cfg.ServerPepper)
-    }
+    telemetryHash := ifNonEmptyHash(signals.TelemetryID, cfg.ServerPepper)
+    deviceInstanceHash := ifNonEmptyHash(signals.DeviceInstanceID, cfg.ServerPepper)
 
-    // Determine if this is auto-detected or explicit
-    isAutoDetected := signals.TelemetryID == "" && signals.DeviceInstanceID == ""
-    
-    // Generate stable device key
+    isAuto := signals.TelemetryID == "" && signals.DeviceInstanceID == ""
+
     deviceKey := computeEnhancedDeviceKey(
         telemetryHash,
         deviceInstanceHash,
@@ -278,11 +303,10 @@ func generateEnhancedFingerprint(signals *DeviceSignals, cfg DeviceFPConfig, uaC
         platform,
         majorVersion(appVersion),
         cfg.ServerPepper,
-        isAutoDetected,
+        isAuto,
     )
-    
-    // Calculate stability score
-    stabilityScore := calculateStabilityScore(signals, isAutoDetected)
+
+    stabilityScore := calculateStabilityScore(signals, isAuto)
 
     return &DeviceFingerprint{
         DeviceKey:            deviceKey,
@@ -293,7 +317,7 @@ func generateEnhancedFingerprint(signals *DeviceSignals, cfg DeviceFPConfig, uaC
         Platform:             platform,
         AppVersion:           appVersion,
         ObservedAt:           now,
-        IsAutoDetected:       isAutoDetected,
+        IsAutoDetected:       isAuto,
         BrowserFingerprint:   browserFP,
         OSFingerprint:        osFP,
         TimezoneOffset:       signals.TimezoneOffset,
@@ -303,34 +327,26 @@ func generateEnhancedFingerprint(signals *DeviceSignals, cfg DeviceFPConfig, uaC
 }
 
 // ==============================
-// Enhanced Detection Logic
+// Enhanced Detection Logic (unchanged)
 // ==============================
 
 func detectPlatform(signals *DeviceSignals) string {
-    // Use explicit platform if provided
     if signals.Platform != "" {
         return normalizePlatform(signals.Platform)
     }
-    
-    // Auto-detect from User-Agent
     ua := strings.ToLower(signals.UserAgent)
-    
     if strings.Contains(ua, "iphone") || strings.Contains(ua, "ipad") {
         return string(PlatformIOS)
     }
-    
     if strings.Contains(ua, "android") && (strings.Contains(ua, "mobile") || strings.Contains(ua, "app")) {
         return string(PlatformAndroid)
     }
-    
     if mobileUserAgentRegex.MatchString(signals.UserAgent) {
         if strings.Contains(ua, "android") {
             return string(PlatformAndroid)
         }
-        return string(PlatformIOS) // Default mobile to iOS
+        return string(PlatformIOS)
     }
-    
-    // Default to web for desktop browsers
     return string(PlatformWeb)
 }
 
@@ -338,13 +354,10 @@ func normalizeVersion(explicit, userAgent string) string {
     if explicit != "" {
         return normalizeSemver(explicit)
     }
-    
-    // Try to extract version from User-Agent
     if matches := browserRegex.FindStringSubmatch(userAgent); len(matches) > 2 {
         return normalizeSemver(matches[2])
     }
-    
-    return "1.0.0" // Default version
+    return "1.0.0"
 }
 
 func generateBrowserFingerprint(signals *DeviceSignals, pepper []byte) string {
@@ -357,7 +370,6 @@ func generateBrowserFingerprint(signals *DeviceSignals, pepper []byte) string {
         "site:" + signals.SecFetchSite,
         "mode:" + signals.SecFetchMode,
     }
-    
     combined := strings.Join(parts, "|")
     return scopedHash("bf:", combined, pepper)
 }
@@ -368,7 +380,6 @@ func generateOSFingerprint(signals *DeviceSignals, pepper []byte) string {
         "tz:" + signals.TimezoneOffset,
         "screen:" + signals.ScreenResolution,
     }
-    
     combined := strings.Join(parts, "|")
     return scopedHash("os:", combined, pepper)
 }
@@ -384,63 +395,44 @@ func extractPrimaryLanguage(acceptLang string) string {
     if acceptLang == "" {
         return ""
     }
-    
-    // Extract primary language (before first comma or semicolon)
-    parts := strings.FieldsFunc(acceptLang, func(r rune) bool {
-        return r == ',' || r == ';'
-    })
-    
+    parts := strings.FieldsFunc(acceptLang, func(r rune) bool { return r == ',' || r == ';' })
     if len(parts) > 0 {
         return strings.TrimSpace(parts[0])
     }
-    
     return ""
 }
 
 func calculateStabilityScore(signals *DeviceSignals, isAutoDetected bool) float64 {
     score := 0.0
-    
-    // Explicit device ID = highest stability
     if signals.TelemetryID != "" {
         score += 0.4
     }
-    
     if signals.DeviceInstanceID != "" {
         score += 0.3
     }
-    
-    // Platform consistency
     if signals.Platform != "" {
         score += 0.1
     }
-    
-    // Browser fingerprint signals
     if signals.AcceptLanguage != "" {
         score += 0.05
     }
-    
     if signals.TimezoneOffset != "" {
         score += 0.05
     }
-    
     if signals.ScreenResolution != "" {
         score += 0.05
     }
-    
     if signals.SecFetchSite != "" {
-        score += 0.05 // Modern browser
+        score += 0.05
     }
-    
-    // Penalty for auto-detection
     if isAutoDetected {
-        score *= 0.7 // Reduce score for auto-detected devices
+        score *= 0.7
     }
-    
     return score
 }
 
 // ==============================
-// Enhanced Device Key Computation
+// Device Key Computation (unchanged for auto path)
 // ==============================
 
 func computeEnhancedDeviceKey(
@@ -455,16 +447,12 @@ func computeEnhancedDeviceKey(
     pepper []byte,
     isAutoDetected bool,
 ) string {
-    // Explicit device identifiers (most stable)
     if telemetryHash != "" {
         return scopedHash("dk:t:", telemetryHash, pepper)
     }
-    
     if deviceInstanceHash != "" {
         return scopedHash("dk:d:", deviceInstanceHash, pepper)
     }
-    
-    // Enhanced auto-detection (more stable than before)
     if isAutoDetected {
         parts := []string{
             "ua:" + uaHash,
@@ -476,8 +464,6 @@ func computeEnhancedDeviceKey(
         }
         return scopedHash("dk:auto:", strings.Join(parts, "|"), pepper)
     }
-    
-    // Fallback to original logic
     parts := []string{
         "ua:" + uaHash,
         "ipb:" + ipBucket,
@@ -488,7 +474,7 @@ func computeEnhancedDeviceKey(
 }
 
 // ==============================
-// All existing helper functions remain the same
+// Helpers
 // ==============================
 
 func b64Hash(data []byte, pepper []byte) string {
@@ -580,7 +566,6 @@ func min(a, b int) int {
     return b
 }
 
-// All existing IP and caching functions remain the same...
 func clientIP(r *http.Request, hdrs []string, trusted []*net.IPNet) net.IP {
     remoteIP := remoteAddrIP(r.RemoteAddr)
     if len(hdrs) == 0 {
@@ -756,11 +741,25 @@ func BuildFingerprintConfigFromApp(c appcfg.FingerprintConfig) (DeviceFPConfig, 
         ServerPepper:          pepper,
         ContextDeadline:       c.ContextDeadline,
         UACacheTTL:            c.UACacheTTL,
-        EnableAutoDetection:   true, // Enable by default
+        EnableAutoDetection:   true,
         StabilityWindow:       24 * time.Hour,
     }
     if err := cfg.Validate(); err != nil {
         return DeviceFPConfig{}, err
     }
     return cfg, nil
+}
+
+func ifNonEmptyHash(v string, pepper []byte) string {
+    if v == "" {
+        return ""
+    }
+    return b64Hash([]byte(v), pepper)
+}
+
+func safePrefix(s string, n int) string {
+    if len(s) <= n {
+        return s
+    }
+    return s[:n] + "..."
 }

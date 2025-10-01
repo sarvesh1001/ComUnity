@@ -652,52 +652,64 @@ func (se *SessionEncryptor) Config() SessionEncryptorConfig {
 	return se.config
 }
 
-// HybridSessionMiddleware validates JWT token and loads corresponding encrypted session
 func (se *SessionEncryptor) HybridSessionMiddleware(jwtManager *util.JWTManager) func(http.Handler) http.Handler {
-    return func(next http.Handler) http.Handler {
-        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-            authHeader := r.Header.Get("Authorization")
-            if !strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
-                next.ServeHTTP(w, r) // No Bearer token, continue
-                return
-            }
-
-            tokenStr := strings.TrimSpace(authHeader[7:])
-            if tokenStr == "" {
-                next.ServeHTTP(w, r)
-                return
-            }
-
-            // Validate JWT token
-            claims, err := jwtManager.ValidateToken(tokenStr)
-            if err != nil {
-                logger.Debug("Invalid JWT token", "error", err)
-                next.ServeHTTP(w, r)
-                return
-            }
-
-            // Lookup session ID via hybrid mapping
-            hybridKey := fmt.Sprintf("hybrid_session:%s", claims.TokenID)
-            sessionID, err := se.redis.Get(r.Context(), hybridKey).Result()
-            if err != nil {
-                logger.Debug("Hybrid session mapping not found", "token_id", claims.TokenID, "error", err)
-                next.ServeHTTP(w, r)
-                return
-            }
-
-            // Validate and decrypt session
-            sessionData, err := se.ValidateAndDecryptSession(r.Context(), sessionID, true)
-            if err != nil {
-                logger.Debug("Session validation failed", "session_id", sessionID, "error", err)
-                next.ServeHTTP(w, r)
-                return
-            }
-
-            // Attach both JWT claims and session data to context
-            ctx := context.WithValue(r.Context(), "jwt_claims", claims)
-            ctx = context.WithValue(ctx, "encrypted_session", sessionData)
-            ctx = context.WithValue(ctx, "session_user_id", sessionData.UserID)
-            next.ServeHTTP(w, r.WithContext(ctx))
-        })
-    }
-}
+	return func(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	
+			authHeader := r.Header.Get("Authorization")
+			if !strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
+				// No bearer → treat as no valid session
+				ctx = context.WithValue(ctx, "session_valid", false)
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+	
+			tokenStr := strings.TrimSpace(authHeader[7:])
+			if tokenStr == "" {
+				ctx = context.WithValue(ctx, "session_valid", false)
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+	
+			claims, err := jwtManager.ValidateToken(tokenStr)
+			if err != nil {
+				logger.Debug("Invalid JWT token", "error", err)
+				ctx = context.WithValue(ctx, "session_valid", false)
+				ctx = context.WithValue(ctx, "session_error", err)
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+	
+			// Map token -> session
+			hybridKey := fmt.Sprintf("hybrid_session:%s", claims.TokenID)
+			sessionID, err := se.redis.Get(ctx, hybridKey).Result()
+			if err != nil {
+				logger.Debug("Hybrid session mapping not found", "token_id", claims.TokenID, "error", err)
+				ctx = context.WithValue(ctx, "jwt_claims", claims)
+				ctx = context.WithValue(ctx, "session_valid", false)
+				ctx = context.WithValue(ctx, "session_error", fmt.Errorf("no session mapping"))
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+	
+			// Validate session (enforces device match)
+			sessionData, err := se.ValidateAndDecryptSession(ctx, sessionID, true)
+			if err != nil {
+				logger.Debug("Session validation failed", "session_id", sessionID, "error", err)
+				ctx = context.WithValue(ctx, "jwt_claims", claims)
+				ctx = context.WithValue(ctx, "session_valid", false)
+				ctx = context.WithValue(ctx, "session_error", err)
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+	
+			// Success
+			ctx = context.WithValue(ctx, "jwt_claims", claims)
+			ctx = context.WithValue(ctx, "encrypted_session", sessionData)
+			ctx = context.WithValue(ctx, "session_user_id", sessionData.UserID)
+			ctx = context.WithValue(ctx, "session_valid", true)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+	}

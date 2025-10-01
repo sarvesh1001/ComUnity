@@ -50,20 +50,15 @@ CREATE TABLE IF NOT EXISTS communities (
 );
 
 -- =========================
--- Users (extended with profile + language preferences)
--- =========================
--- Note: device_fingerprints table must exist before this file or in an earlier migration.
--- =========================
 -- Users (profile + array-only language preferences)
 -- =========================
--- Users (profile + array-only language preferences)
 CREATE TABLE IF NOT EXISTS users (
   id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   phone_number         TEXT NOT NULL UNIQUE,
   username             TEXT UNIQUE,
   display_name         TEXT,
   preferred_languages  TEXT[] NOT NULL DEFAULT ARRAY['en']::TEXT[],
-  verification_status  TEXT NOT NULL DEFAULT 'NONE',        -- NONE | BLUE_TICK | GREEN_TICK
+  verification_status  TEXT NOT NULL DEFAULT 'NONE',
   phone_verified       BOOLEAN DEFAULT FALSE,
   setup_completed      BOOLEAN NOT NULL DEFAULT FALSE,
   primary_device_id    UUID REFERENCES device_fingerprints(id) ON DELETE SET NULL,
@@ -71,7 +66,6 @@ CREATE TABLE IF NOT EXISTS users (
   created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
-  -- Constraints
   CONSTRAINT chk_users_languages_valid
     CHECK (preferred_languages <@ ARRAY['hi','en','ta','te','bn','mr','gu','kn','ml','or','pa','as']),
   CONSTRAINT chk_users_languages_size
@@ -79,11 +73,9 @@ CREATE TABLE IF NOT EXISTS users (
   CONSTRAINT chk_users_verification
     CHECK (verification_status IN ('NONE','BLUE_TICK','GREEN_TICK')),
 
-  -- Optional hygiene: username must be non-empty if present
   CONSTRAINT chk_users_username_trimmed
     CHECK (username IS NULL OR username = NULLIF(BTRIM(username), '')),
 
-  -- Optional hygiene: simple phone_number sanity (10-15 digits)
   CONSTRAINT chk_users_phone_format
     CHECK (phone_number ~ '^[0-9]{10,15}$')
 );
@@ -96,7 +88,6 @@ CREATE INDEX IF NOT EXISTS idx_users_pref_langs_gin ON users USING GIN (preferre
 -- =========================
 -- User Roles (assign roles to users within a community)
 -- =========================
--- User Roles (assign roles to users within a community)
 CREATE TABLE IF NOT EXISTS user_roles (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE ON UPDATE CASCADE,
@@ -116,9 +107,30 @@ CREATE INDEX IF NOT EXISTS idx_user_roles_user ON user_roles(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_roles_role ON user_roles(role_id);
 CREATE INDEX IF NOT EXISTS idx_user_roles_status ON user_roles(status);
 
+-- NEW: Ensure ON CONFLICT (user_id, community_id, role_id) works for triggers
+CREATE UNIQUE INDEX IF NOT EXISTS ux_user_roles_user_comm_role
+ON user_roles (user_id, community_id, role_id);
+
 -- Role Permissions (many-to-many)
 CREATE TABLE IF NOT EXISTS role_permissions (
   role_id UUID NOT NULL REFERENCES roles(id) ON DELETE CASCADE ON UPDATE CASCADE,
   permission_id UUID NOT NULL REFERENCES permissions(id) ON DELETE CASCADE ON UPDATE CASCADE,
   PRIMARY KEY (role_id, permission_id)
 );
+
+-- OPTIONAL: Seed manage/admin permissions for owner/admin roles (idempotent)
+-- Ensures creators (community_owner) can update settings immediately.
+INSERT INTO role_permissions (role_id, permission_id)
+SELECT r.id, p.id
+FROM roles r
+JOIN permissions p ON p.name IN (
+  'community:manage_settings',
+  'community:approve_members',
+  'community:remove_members',
+  'community:promote_members',
+  'community:invite',
+  'community:view_members',
+  'post:moderate'
+)
+WHERE r.name IN ('community_owner','community_admin')
+ON CONFLICT (role_id, permission_id) DO NOTHING;

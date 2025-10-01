@@ -37,7 +37,6 @@ import (
 )
 
 var version = "development"
-
 type SMSProvider interface {
 	SendOTP(ctx context.Context, phone, code string) error
 }
@@ -98,6 +97,17 @@ func HSTSMiddleware(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+type permissionCheckerAdapter struct {
+	roleService interface {
+	HasPermission(ctx context.Context, userID uuid.UUID, permission string, authzCtx *models.AuthzContext) (bool, error)
+	}
+	}
+	
+	func (p *permissionCheckerAdapter) HasGlobalPermission(ctx context.Context, userID uuid.UUID, permission string) (bool, error) {
+	return p.roleService.HasPermission(ctx, userID, permission, &models.AuthzContext{})
+	}
+	
+	
 
 func main() {
 	// Load config
@@ -270,6 +280,20 @@ func main() {
 	schoolRepo := repository.NewCockroachSchoolRepository(db)
 	cacheRepo := repository.NewRedisCacheRepository(rcli) // or client.NewRedisCache(rcli)
 	deviceRepo.StartEventWorker(context.Background())
+	// Community repos (split)
+	coreRepo := repository.NewCockroachCommunityCoreRepository(db)
+	memRepo  := repository.NewCockroachCommunityMembershipRepository(db)
+	cntRepo  := repository.NewCockroachCommunityContentRepository(db)
+	admRepo  := repository.NewCockroachCommunityAdminRepository(db)
+
+	// Community services
+	coreSvc := service.NewCommunityCoreService(coreRepo)
+	memSvc  := service.NewCommunityMembershipService(memRepo)
+	cntSvc  := service.NewCommunityContentService(cntRepo)
+	admSvc  := service.NewCommunityAdminService(admRepo)
+
+	// Community handlers
+	
 
 	// Initialize JWT Manager using KMS adapter - SINGLE INITIALIZATION
 	jwtManager := util.NewJWTManager(
@@ -545,10 +569,14 @@ func main() {
 	// RBAC services with JWT integration
 	entChecker := service.NewEntitlementChecker()
 	roleService := service.NewRoleService(roleRepo, userRepo, communityRepo, cacheRepo, entChecker, "1.0")
-
+	
 	// Initialize RBAC handler
 	roleHandler := handler.NewRoleHandler(roleService)
-
+	permAdapter := &permissionCheckerAdapter{roleService: roleService}
+	coreH := handler.NewCommunityCoreHandler(coreSvc, permAdapter)
+	memH  := handler.NewCommunityMembershipHandler(memSvc)
+	cntH  := handler.NewCommunityContentHandler(cntSvc)
+	admH  := handler.NewCommunityAdminHandler(admSvc)
 	// Child Safety Repo + Service
 	consentManager := service.NewConsentManager(consentRepo)
 	childProfileHandler := handler.NewChildProfileHandler(consentManager)
@@ -556,8 +584,30 @@ func main() {
 	// School Repo + Service
 	schoolValidator := service.NewSchoolValidator(schoolRepo)
 	schoolHandler := handler.NewSchoolHandler(schoolValidator)
-
+	sessionEnforcementGuard := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		v := r.Context().Value("session_valid")
+		ok, _ := v.(bool)
+		if !ok {
+		http.Error(w, "Unauthorized: invalid session", http.StatusUnauthorized)
+		return
+		}
+		next.ServeHTTP(w, r)
+		})
+		}
 	// Router with session middleware
+	sessionCommunityIDContext := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := chi.URLParam(r, "communityID")
+		if id != "" {
+		if cid, err := uuid.Parse(id); err == nil {
+		ctx := context.WithValue(r.Context(), "community_id", cid)
+		r = r.WithContext(ctx)
+		}
+		}
+		next.ServeHTTP(w, r)
+		})
+	}
 	r := chi.NewRouter()
 	r.Use(HSTSMiddleware) // Add security headers
 
@@ -585,7 +635,8 @@ func main() {
 		// Protected endpoints (require hybrid JWT + Session validation)
 		rt.Group(func(pr chi.Router) {
 			pr.Use(sessionEncryptor.HybridSessionMiddleware(jwtManager))
-			
+			pr.Use(sessionEnforcementGuard) // enforce strict device-bound session
+
 			
         // âœ… ADD PROFILE ROUTES HERE
 			profileHandler := handler.NewProfileHandler(userRepo, jwtManager)
@@ -741,60 +792,139 @@ func main() {
 		rt.Get("/{id}/status", schoolHandler.GetSchoolStatus)
 	})
 
-	// RBAC routes
-	r.Route("/rbac", func(r chi.Router) {
-		// Apply JWT authentication middleware to all RBAC routes
-		r.Use(JWTMiddleware(jwtManager, tokenRotator))
-		r.Use(middleware.RequireSetupCompleted)  // âœ… ADD THIS LINE - Block incomplete profiles
 
-		// Role management
+// RBAC routes (strict session)
+r.Route("/rbac", func(r chi.Router) {
+    r.Use(JWTMiddleware(jwtManager, tokenRotator))
+    r.Use(sessionEncryptor.HybridSessionMiddleware(jwtManager))
+    r.Use(sessionEnforcementGuard)
+    r.Use(middleware.RequireSetupCompleted)
 
-		r.Post("/role", roleHandler.CreateRole)
-		r.Post("/role/assign", roleHandler.AssignRole)
-		r.Post("/role/remove", roleHandler.RemoveRole)
+    // Role management
+    r.Post("/role", roleHandler.CreateRole)
+    r.Post("/role/assign", roleHandler.AssignRole)
+    r.Post("/role/remove", roleHandler.RemoveRole)
 
-		// Permission queries
-		r.Get("/user/{userID}/community/{communityID}/permissions", roleHandler.GetUserPermissions)
-		r.Get("/user/{userID}/community/{communityID}/roles", roleHandler.GetUserRoles)
-		r.Get("/community/{communityID}/roles", roleHandler.GetCommunityRoles)
-		r.Get("/role/{roleID}/permissions", roleHandler.GetRolePermissions)
+    // Permission queries
+    r.Get("/user/{userID}/community/{communityID}/permissions", roleHandler.GetUserPermissions)
+    r.Get("/user/{userID}/community/{communityID}/roles", roleHandler.GetUserRoles)
+    r.Get("/community/{communityID}/roles", roleHandler.GetCommunityRoles)
+    r.Get("/role/{roleID}/permissions", roleHandler.GetRolePermissions)
 
-		// User blocking
-		r.Post("/block", roleHandler.BlockUser)
-		r.Post("/unblock", roleHandler.UnblockUser)
-		r.Get("/user/{userID}/blocks", roleHandler.GetUserBlocks)
-		// User reporting
-		r.Post("/report", roleHandler.ReportUser)
-		// Comment out until UpdateReportStatus method is implemented
-		// r.Put("/report/status", roleHandler.UpdateReportStatus)
-		r.Get("/user/{userID}/reports", roleHandler.GetUserReports)
-	})
+    // User blocking/reporting
+    r.Post("/block", roleHandler.BlockUser)
+    r.Post("/unblock", roleHandler.UnblockUser)
+    r.Get("/user/{userID}/blocks", roleHandler.GetUserBlocks)
+    r.Post("/report", roleHandler.ReportUser)
+    // r.Put("/report/status", roleHandler.UpdateReportStatus)
+    r.Get("/user/{userID}/reports", roleHandler.GetUserReports)
+})
 
-	// Example protected routes with JWT + RBAC
-	r.Route("/community/{communityID}", func(r chi.Router) {
-		// Apply JWT authentication and community context middleware
-		r.Use(JWTMiddleware(jwtManager, tokenRotator))
-		r.Use(CommunityContextMiddleware)
-		r.Use(middleware.RequireSetupCompleted)  // âœ… ADD THIS LINE - Block incomplete profiles
+// Example per-community protected routes (strict)
+r.Route("/community/{communityID}", func(r chi.Router) {
+    r.Use(JWTMiddleware(jwtManager, tokenRotator))
+    r.Use(sessionEncryptor.HybridSessionMiddleware(jwtManager))
+    r.Use(sessionEnforcementGuard)
+    r.Use(sessionCommunityIDContext)
+    r.Use(middleware.RequireSetupCompleted)
 
-		// Example: Class attendance route
-		r.With(RBACMiddleware("attendance:mark:class", roleService, jwtManager)).
-			Post("/class/{classID}/attendance", MarkAttendanceHandler)
+    r.With(RBACMiddleware("attendance:mark:class", roleService, jwtManager)).
+        Post("/class/{classID}/attendance", MarkAttendanceHandler)
 
-		// Example: Government alert route
-		r.With(RBACMiddleware("alert:broadcast:government", roleService, jwtManager)).
-			Post("/alert", BroadcastAlertHandler)
+    r.With(RBACMiddleware("alert:broadcast:government", roleService, jwtManager)).
+        Post("/alert", BroadcastAlertHandler)
 
-		// Example: Billing route
-		r.With(RBACMiddleware("billing:view", roleService, jwtManager)).
-			Get("/billing", ViewBillingHandler)
+    r.With(RBACMiddleware("billing:view", roleService, jwtManager)).
+        Get("/billing", ViewBillingHandler)
 
-		// Example: Content moderation route
-		r.With(RBACMiddleware("content:moderate", roleService, jwtManager)).
-			Post("/post/{postID}/moderate", ModerateContentHandler)
-	})
+    r.With(RBACMiddleware("content:moderate", roleService, jwtManager)).
+        Post("/post/{postID}/moderate", ModerateContentHandler)
+})
 
-	// Debug routes
+// Communities (strict session + scoped permissions)
+r.Route("/communities", func(rt chi.Router) {
+    rt.Use(JWTMiddleware(jwtManager, tokenRotator))
+    rt.Use(sessionEncryptor.HybridSessionMiddleware(jwtManager))
+    rt.Use(sessionEnforcementGuard)
+    rt.Use(middleware.RequireSetupCompleted)
+
+    // Core
+    rt.Post("/", coreH.CreateCommunity)
+    rt.Get("/", coreH.ListByType)
+    rt.Get("/me", coreH.ListUserCommunities)
+    rt.Get("/{communityID}", coreH.GetCommunity)
+
+    rt.With(sessionCommunityIDContext, RBACMiddleware("community:manage_settings", roleService, jwtManager)).
+		Put("/{communityID}", coreH.UpdateCommunity)
+
+    // Membership
+    rt.With(sessionCommunityIDContext).
+        Post("/{communityID}/join", memH.RequestJoin)
+
+    rt.With(sessionCommunityIDContext, RequirePermission("community:approve_members", roleService)).
+        Post("/join-requests/{requestID}/review", memH.ReviewJoin)
+
+    rt.With(sessionCommunityIDContext).
+        Get("/{communityID}/members", memH.ListMembers)
+
+    rt.With(sessionCommunityIDContext, RequirePermission("community:promote_members", roleService)).
+        Post("/{communityID}/members/{userID}/role", memH.ChangeMemberRole)
+
+    rt.With(sessionCommunityIDContext, RequirePermission("community:remove_members", roleService)).
+        Delete("/{communityID}/members/{userID}", memH.RemoveMember)
+
+    rt.With(sessionCommunityIDContext, RequirePermission("community:invite", roleService)).
+        Post("/{communityID}/invitations", memH.CreateInvitation)
+
+    rt.With(sessionCommunityIDContext).
+        Post("/invitations/{invitationID}/accept", memH.AcceptInvitation)
+
+    rt.With(sessionCommunityIDContext).
+        Post("/invitations/{invitationID}/decline", memH.DeclineInvitation)
+
+    // Content
+    rt.With(sessionCommunityIDContext, RequirePermission("post:create", roleService)).
+        Post("/{communityID}/posts", cntH.CreatePost)
+
+    rt.With(sessionCommunityIDContext).
+        Get("/{communityID}/posts", cntH.ListPosts)
+
+    rt.With(sessionCommunityIDContext, RequirePermission("post:moderate", roleService)).
+        Put("/posts/{postID}/status", cntH.ModeratePost)
+
+    rt.Post("/posts/{postID}/comments", cntH.AddComment)
+    rt.Get("/posts/{postID}/comments", cntH.ListComments)
+    rt.Post("/posts/{postID}/reactions", cntH.ReactToPost)
+    rt.Post("/comments/{commentID}/reactions", cntH.ReactToComment)
+
+    rt.Post("/events/{postID}/rsvp", cntH.RSVPEvent)
+    rt.Get("/events/{postID}/attendees", cntH.ListEventAttendees)
+})
+
+// Admin community moderation & verification (strict)
+r.Route("/admin/communities", func(rt chi.Router) {
+    rt.Use(JWTMiddleware(jwtManager, tokenRotator))
+    rt.Use(sessionEncryptor.HybridSessionMiddleware(jwtManager))
+    rt.Use(sessionEnforcementGuard)
+    rt.Use(RequirePermission("admin:communities:verify", roleService))
+
+    rt.With(sessionCommunityIDContext).
+        Post("/{communityID}/verification-requests", admH.SubmitVerification)
+
+    rt.Post("/verification-requests/{requestID}/decision", admH.DecideVerification)
+    rt.Get("/verification-requests", admH.ListPendingVerifications)
+
+    rt.With(sessionCommunityIDContext).Post("/{communityID}/block", admH.BlockCommunity)
+    rt.With(sessionCommunityIDContext).Post("/{communityID}/unblock", admH.UnblockCommunity)
+
+    rt.Post("/actions", admH.LogAdminAction)
+    rt.Get("/actions", admH.ListAdminActions)
+
+    rt.Post("/system-reports", admH.CreateSystemReport)
+    rt.Patch("/system-reports/{reportID}", admH.UpdateSystemReport)
+    rt.Get("/system-reports", admH.ListSystemReports)
+})
+// Debug routes
 	if cfg.Env == "development" {
 		r.Get("/fp/debug", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
